@@ -2,7 +2,7 @@
 title: Obsidian API quirks
 description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, and workarounds.
 author: 🤖 Generated with Claude Code
-updated: 2026-04-10
+updated: 2026-09-25
 ---
 
 # Obsidian API quirks
@@ -72,17 +72,35 @@ if (Array.isArray(data)) {
 
 This relies on Obsidian's internal `Value` implementation. If the internal property is renamed or restructured, access breaks silently (returns `undefined`). There is no public API alternative for extracting raw values beyond `toString()`.
 
-## Bases `config.get()` falls back to schema defaults
+## How an open `.base` saves and reloads
 
-> Observed in Obsidian **1.12.1**, installer 1.11.4.
+> Observed in Obsidian **1.14.2**.
 
-`BasesViewConfig.get(key)` does not return `undefined` for missing YAML keys. It falls back to the `default` value from the view's schema (the `ViewOption[]` array returned by the options callback registered in `BasesViewRegistration`).
+A `.base` file's save and reload behavior depends on how it is open, and the differences make an outside write to any open form unsafe.
 
-This means schema defaults are not just cosmetic (initial GUI display) — they affect all runtime config reads for keys absent from YAML.
+- **Config writes never touch disk directly.** `BasesViewConfig.set(key, value)` mutates the config's in-memory data object — `null` deletes a key, any other value (including `undefined`) is assigned — then calls the owning query's `save()`, routed to whichever save function the hosting instance registered. `get(key)` returns the raw stored value with no schema-default fallback (see "Bases `config.get()` returns the raw stored value" below). `getAll()` returns that same live data object, or a fresh empty one before anything is set.
+- **A standalone tab** debounces its save 2000ms from the *first* pending change — a later change in the same window does not restart the timer — and the flush serializes whatever the view's query holds at flush time, not the value at the moment of the edit. The tab ignores its own resulting disk write (a saving flag, then an equality check against what it last wrote), but an outside write that differs is loaded as a new query object, **replacing** the tab's own unflushed changes rather than merging with them.
+- **An embedded view** debounces its save 1000ms and writes the query object its last change belonged to — even when a write from elsewhere has since reloaded the embed into a newer one, so its flush can land a stale copy over that write. Unlike a standalone tab, it reloads on every change to the file, its own writes included.
+- **A view written as a code block in a note** saves through a short-debounced rewrite of the block's own text in the host note — it never touches a `.base` file at all.
+- **A same-content reload keeps the same config object.** `QueryController.setQuery()` re-uses the existing query object when the incoming query serializes identically to what it already holds, so a round-trip that changes nothing does not invalidate an object a caller is still holding. Any other reload assigns a new query object, and the controller re-points the active view's config to it on every update regardless.
+- **The Configure view UI keeps its own reference.** Once opened, it holds the config object that was live at the time. If the file reloads underneath it into a new query object, the UI's next edit still writes to the old object, and saving from that old query hands the controller the old query back — undoing the reload.
+- **Multiple visible instances of the same file race independently.** Each instance debounces and flushes on its own schedule, so when two instances of the same file are visible and initializing at once, an edit made in one can be silently discarded if the other instance's shorter flush window reloads the file first. This needs two concurrently-initializing visible instances of the same file plus an edit landing inside the other's flush window — not a path an ordinary single-instance edit reaches.
+
+### Implication
+
+A background write to an open `.base` file through `vault.process()` or `vault.modify()` races every mechanism above — it can be silently replaced by a pending in-memory save, or itself replace another instance's unflushed edit. Writing through `config.set()` on the config object the running instance already holds rides Obsidian's own save path instead, avoiding the race entirely outside the multi-instance case above.
+
+## Bases `config.get()` returns the raw stored value
+
+> Read from `app.js` in Obsidian **1.14.2**. An earlier note, observed on 1.12.1 (installer 1.11.4), said `get()` fell back to the schema default; 1.14.2 does not.
+
+- **No fallback**: `BasesViewConfig.get(key)` returns `data?.[key]`, so a key the view does not store reads `undefined`. `getAll()` returns the live `data` object, or a fresh `{}` while nothing is stored.
+- **Schema defaults live in the settings UI only**: each control in the view settings menu shows `config.get(key) ?? option.default`. A reader that wants the same value for an absent key must apply its own default.
 
 ### Implication for dynamic defaults
 
-If schema defaults are computed at runtime (e.g., merged with a settings template), those computed values leak into `config.get()` for any key the user has cleared or never set. A cleared property picker field (value removed from YAML) silently reverts to whatever the schema default was at the time the options callback last ran.
+- **Panel and render can disagree**: a schema default computed at runtime (e.g., merged with a settings template) reaches only the settings UI. The control shows it for an absent key while `config.get()` returns `undefined`, so the reader must resolve the same fallback itself.
+- **A cleared picker shows the default again**: a property picker clears with `set(key, undefined)`. `get()` then returns `undefined`, the YAML dumper drops the key on save, and the next time the menu is shown the control displays the schema default.
 
 ## Bases YAML normalization strips default values
 
@@ -96,6 +114,6 @@ After testing with a non-default value (e.g., `rightPropertyPosition: column`), 
 
 ### Workaround
 
-Accept that default-valued properties are absent from YAML. Use `config.get(key)` which falls back to schema defaults (see "Bases `config.get()` falls back to schema defaults" above) rather than parsing YAML directly.
+Accept that default-valued properties are absent from YAML, and resolve an absent key against the reader's own defaults at read time. `config.get()` returns `undefined` for it (see "Bases `config.get()` returns the raw stored value" above).
 
 
