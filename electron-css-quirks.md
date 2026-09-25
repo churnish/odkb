@@ -2,7 +2,7 @@
 title: Electron CSS quirks
 description: Blink/Electron CSS rendering quirks affecting selectors, text truncation, overflow clipping, container queries, and GPU compositing.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-09
+updated: 2026-09-25
 ---
 # Electron CSS quirks
 
@@ -275,6 +275,15 @@ The unprefixed `line-clamp` spec uses block-ellipsis placement which does not re
 
 - **Tracking**: https://issues.chromium.org/issues/40336192
 - **CSSWG spec**: https://drafts.csswg.org/css-overflow-4/#propdef-line-clamp
+
+## `-webkit-line-clamp` loses its ellipsis under right-aligned text
+
+**Observed**: 2026-09-25, Electron 43.7.1.
+
+When a `-webkit-line-clamp` truncation leaves room on the last visible line, Chromium places the ellipsis after that line's content without re-aligning the line. Under `text-align: right` the content already ends at the right edge, so the ellipsis lands past it, where the element's clip hides it: the text truncates with no visible `…`. A last line that fills the full width truncates normally and shows it.
+
+- **Measured** with plain text and with inline list items.
+- **Unmeasured**: centered text.
 
 ## `z-index: 0` on `.cm-line` breaks CM6 click-to-position
 

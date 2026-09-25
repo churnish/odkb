@@ -116,4 +116,12 @@ After testing with a non-default value (e.g., `rightPropertyPosition: column`), 
 
 Accept that default-valued properties are absent from YAML, and resolve an absent key against the reader's own defaults at read time. `config.get()` returns `undefined` for it (see "Bases `config.get()` returns the raw stored value" above).
 
+## Bases view options have no change callback
 
+**Observed**: 2026-09-25, API 1.13.1 typings; re-run behavior read from `app.js` 1.14.2.
+
+No `Bases*Option` type — nor the shared `BasesOption` base interface, nor `BasesOptionGroup` — declares an `onChange`; the only per-control hook is `shouldHide?: () => boolean`. A setting that depends on another can therefore only be hidden and ignored when read — never cleared or reset when the other one changes.
+
+- **Re-run trigger**: after every control's own `set(key, value)` call, Obsidian calls `updateHiddenOptions()`, which re-invokes `shouldHide()` for every control across all groups in the panel — not just the control that changed.
+- **Group auto-hide**: for a `"group"`-type control that isn't itself hidden by its own `shouldHide()`, `updateHiddenOptions()` also hides the group when every one of its items is hidden — the group stays visible only while at least one item inside it is.
+- **Groups cannot nest**: `BasesAllOptions` is `BasesOptions | BasesOptionGroup<BasesOptions>` — a group's `items` are typed as `BasesOptions[]`, the leaf-option union, never `BasesAllOptions[]`. A group cannot contain another group.

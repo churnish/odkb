@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-04-07
+updated: 2026-09-25
 ---
 # Undocumented Obsidian APIs
 
@@ -22,6 +22,7 @@ Manages drag-and-drop operations. Key methods:
 - **`dragLink(event, linkText, sourcePath, title?, source?)`**: Creates a draggable for a link. Ghost shows **link icon** (`lucide-link`). `sourcePath` is used for link resolution — pass `''` for absolute vault paths.
 - **`dragFolder(event, folder)`**: Creates a draggable for a `TFolder`.
 - **`onDragStart(event, draggable)`**: Registers the draggable with the drag manager. Must be called after `dragFile`/`dragLink`/`dragFolder`.
+- **`onDragEnd()`**: Cleans up after a drag — detaches the ghost element, clears drag state (`draggable`, `dragStart`, hover/source tracking), and removes `is-grabbing` from `document.body`.
 
 Vanilla Bases uses `dragLink` for card drags (producing a link ghost), not `dragFile`.
 
@@ -30,6 +31,14 @@ Vanilla Bases uses `dragLink` for card drags (producing a link ghost), not `drag
 const dragData = app.dragManager.dragLink(e, card.path, '');
 app.dragManager.onDragStart(e, dragData);
 ```
+
+### `onDragEnd()` cleanup wiring, and the `stopPropagation()` gotcha
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+DragManager registers its own `dragstart` listener on `window` in the bubble phase, not capture. On every `dragstart` that reaches it, the listener adds a once-only `dragend` listener on the drag source (`event.targetNode`) that calls `onDragEnd()` — this is the only place a normal drag's cleanup gets wired. On mobile, `onDragStart()` additionally adds a `window`-level `touchend` listener that also calls `onDragEnd()` once all touches lift, covering touch-driven drags that never fire a `dragend`.
+
+A plugin `dragstart` handler that calls `event.stopPropagation()` before its own `onDragStart()` call — to keep an inner element's drag from also being handled by an ancestor's listener, for instance — hides that drag from DragManager's bubble-phase `window` listener too, since `stopPropagation()` stops the event before it reaches `window`. DragManager never gets the chance to register its `dragend` cleanup, so the handler must register the same once-only `dragend` → `onDragEnd()` listener on the drag source itself. Skipping this leaves the ghost element and `is-grabbing` on `document.body` after the drop.
 
 ## Menu
 

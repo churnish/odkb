@@ -1,8 +1,8 @@
 ---
 title: Obsidian CSS specificity
-description: How Obsidian's app.css uses high-specificity stateful selectors that plugin overrides cannot beat, how to identify the winning rule at runtime, and when !important is the correct answer.
+description: How Obsidian's app.css uses high-specificity stateful selectors that plugin overrides cannot beat, how to identify the winning rule at runtime, when !important is the correct answer, and generic class names that app.css already styles.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-06
+updated: 2026-09-25
 ---
 # Obsidian CSS specificity
 
@@ -103,6 +103,14 @@ Reach for (3) only when (1) and (2) genuinely cannot win. The signal is that mat
 ## Interaction with the review bot
 
 `eslint-plugin-obsidianmd`'s CSS lint flags every `!important` as a warning and suggests raising specificity instead. That advice is correct for most cases and wrong for this one. Warnings are advisory, not approval-blocking — keep the declaration with a comment naming the competing selector and its specificity. See `obsidian-review-bot.md`.
+
+## A generic class name can collide with `app.css`
+
+**Observed**: 2026-09-25, Obsidian 1.14.2.
+
+Not a specificity loss: a plugin element picks up an unrelated `app.css` rule because its own class name already means something there, so it renders with Obsidian's styling from the moment it mounts.
+
+`.list-item` is one such name. `app.css` styles it as a flex row (`display: flex`) with vertical margins (`margin: var(--size-4-2) 0`), a `gap` and centered items (`align-items: center`), so a plugin element reusing the class inherits all four. Overriding `display` with `inline` neutralizes them together — `gap` and `align-items` need a flex container, and vertical margins do not apply to inline boxes — while a namespaced class avoids the collision outright. Check `app.css` before reusing a name that looks generic.
 
 ## Related
 
