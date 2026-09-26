@@ -66,6 +66,26 @@ Observed in Obsidian 1.12.5.
 
 - **No event system**: `app.plugins` has no events for plugin enable/disable. `workspace.on('layout-change')` does NOT reliably fire on `enablePlugin`/`enablePluginAndSave`. Polling or retry loops are the only option for detecting another plugin becoming available after startup.
 
+## PopoverSuggest and the history stack
+
+Obsidian keeps its own history stack, one per window, behind the patched `window.history.back()`/`forward()` — the stack a mouse back button, Android's back gesture and Electron's `swipe`/`app-command` handling all step through. It is module-private, and there is no documented way to push an entry onto it directly.
+
+`PopoverSuggest`'s `open()`/`close()` do it internally: `open()` pushes an entry onto `activeWindow`'s stack (and pushes the popover's own keymap `Scope` at the same time), `close()` pops both. A subclass that never draws anything — empty `renderSuggestion`/`selectSuggestion`, and `attachDom`/`detachDom` overridden to no-ops so `open()` appends nothing visible to the DOM — is a working handle onto the stack with no UI cost. Implement the public `HistoryHandler` interface alongside it: `onHistoryBack()` is the hook a back press calls on the top-of-stack entry. Leave out the optional `onHistoryForward()`, and a forward press with the entry on top does nothing.
+
+The popover's own scope shadows whatever key bindings were active before it, so when the entry's scope must not intercept anything, pop it immediately after `open()` returns (`app.keymap.popScope(entry.scope)`) — the entry stays on the history stack regardless, since the push and the scope are two separate operations underneath.
+
+**A leaf torn into its own window does not consult its own stack for its back feeders.** Such a popout forwards its `history.back()` and its mouse back/forward presses to the MAIN window, so they resolve through the main window's stack (measured) — an entry pushed only on a leaf popout's own stack is unreachable from the very back feeders a user would expect to trigger it there. Only modal popouts, such as the settings window, keep a stack of their own.
+
+## Scope
+
+- **`Scope.prototype.handleKey(evt, ctx)`**: The dispatch `Keymap.onKeyEvent` calls on the top scope of `activeWindow`'s stack — undocumented, but present at runtime. It tries the scope's entries in order, then its `parent`. A catch-all entry (`register(null, null, fn)`) that returns `undefined` falls through to the next entry; a specific-key entry returns its listener's result even when that is `undefined`, so it never falls through. The built-in hotkey catch-all returns `false` whenever a matching hotkey's command is found and run — even when that command's check callback then does nothing — and `undefined` when no hotkey matches.
+
+  Calling it directly from inside a custom scope's own catch-all handler lets that scope defer to the user's configured hotkeys before running its own key handling: `app.scope` is the keymap root and holds the hotkey catch-all, so `app.scope.handleKey(evt, ctx)` answers "does a hotkey already claim this key?" A custom, single-purpose overlay scope can run this check first and only fall through to its own handling when the result is `undefined` — so a user's own binding for a key a plugin would otherwise also bind (an arrow key, a modifier combination) wins.
+
+### The global `activeWindow` pin
+
+Some API methods — `PopoverSuggest.open()` above among them — read the global `activeWindow` internally to decide which window's own state (a history stack, a scope) they operate on, rather than accepting a window as an argument. A plugin that needs the operation to target a SPECIFIC window regardless of which window is actually focused when the call happens can bracket it: write `window.activeWindow = <target window>` immediately before the call, and restore the previous value in a `finally` block immediately after, so the override never outlives the single call it exists for. Use the property form, `window.activeWindow = …`: a bare `activeWindow = …` trips ESLint's `no-global-assign`, and in strict-mode code it throws a `ReferenceError` wherever the global is not defined, a jsdom test run among them.
+
 ## Workspace
 
 ### `data-ignore-swipe` attribute
