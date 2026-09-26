@@ -14,6 +14,18 @@ For comprehensive type definitions of Obsidian's internal APIs, search `dist/typ
 
 - **`app.debugMode`**: Boolean. Toggles Obsidian's internal debug mode, which surfaces extra logging.
 
+## Bases view settings menu (`viewMenu`)
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+Driving a Bases view's settings menu ("Configure view") from a probe, rather than through the GUI:
+
+- **The open settings page**: the Bases query controller's `viewMenu.pageStack.last()` is the currently open settings page. Its `.view` is the view config object the page edits, held for the whole lifetime of the page — see `obsidian-api-quirks.md` for why that reference can go stale after a reload.
+- **Opening it synthetically**: a synthetic `contextmenu` `MouseEvent` dispatched on `viewMenu.toolbarItem.button.buttonEl` opens the settings page for the current view (verified on an embedded Bases view).
+- **Switching layout persists only through the dropdown's own handler**: replaying it — `page.view.type = '<type>'; page.display(page.view); page.controller.query.save()` — reaches disk, because it goes through the query's own save function. Assigning `config.type` directly and calling `setQueryAndView` does not.
+- **CDP clicks on the Layout dropdown are unreliable**: clicking the Layout combobox's suggestion items via CDP times out as "not interactive". The popover also renders into the app's currently active window, which may not be the window the base itself is open in.
+- **Capturing an embed's controller**: wrap the controller prototype's `update` method — taken from any standalone Bases leaf's controller, since the prototype is shared — and filter invocations on `this.query.file.path`. One embed rendered in Reading view can construct several controllers; only one of them is the one actually visible.
+
 ## DragManager (`app.dragManager`)
 
 Manages drag-and-drop operations. Key methods:

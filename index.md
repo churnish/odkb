@@ -11,7 +11,7 @@ updated: 2026-09-25
 
 | Doc | Read before |
 |---|---|
-| `undocumented-obsidian-apis.md` | Using or looking up undocumented Obsidian properties and methods, or calling `app.dragManager` from a `dragstart` handler — documents useful internal APIs discovered through runtime inspection. |
+| `undocumented-obsidian-apis.md` | Using or looking up undocumented Obsidian properties and methods, driving a Bases view's settings menu from a probe, or calling `app.dragManager` from a `dragstart` handler — documents useful internal APIs discovered through runtime inspection. |
 | `ios-webkit-quirks.md` | Modifying content-visibility, IntersectionObserver, scroll-state container queries, touch handling on `position: fixed` elements, suppressing long-press image drag, or click synthesis behavior — iOS WebKit has platform-specific bugs including compositor hit-test divergence. |
 | `electron-popout-quirks.md` | Using `document`, `window`, `ResizeObserver`, `IntersectionObserver`, `requestAnimationFrame`, `floatingSplit`, or `:hover` checks in code that may run in popout windows — covers silent observer failures, RAF paint timing, stale hit-testing, document enumeration, and module-scope binding issues. |
 | `obsidian-api-quirks.md` | Using `vault.process()`, `vault.modify()`, `new Notice()`, Bases `config.get()`/`config.set()` with dynamic schema defaults, Bases view options that depend on another option or sit in a group, how an open `.base` file saves and reloads across its three open forms, or any file I/O that could race with Obsidian's debounced writes. |
