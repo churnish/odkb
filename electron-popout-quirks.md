@@ -1,13 +1,13 @@
 ---
 title: Electron popout window quirks
-description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows.
+description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows — observers, animation frames, hit-testing, element creation and image downloads.
 author: 🤖 Generated with Claude Code
-updated: 2026-04-14
+updated: 2026-09-27
 ---
 
 # Electron popout window quirks
 
-Obsidian's "Open in new window" creates an Electron `BrowserWindow` (popout) with a separate V8 isolate and separate document. Plugin JS runs in the main window's context but operates on DOM elements in the popout's document. This causes several non-obvious issues.
+Obsidian's "Open in new window" creates an Electron `BrowserWindow` (popout) with its own document and its own `window` global — a separate JavaScript realm, with its own constructors — in the same renderer process and V8 isolate as the main window. Plugin JS runs in the main window's context but operates on DOM elements in the popout's document. This causes several non-obvious issues.
 
 ## Module-scope `document`/`window` resolve to main window
 
@@ -21,6 +21,46 @@ new win.ResizeObserver((entries) => { ... });
 ```
 
 **Affected APIs**: `document.body`, `document.activeElement`, `document.hasFocus()`, `document.createElement()`, `window.innerWidth/innerHeight`, `window.focus()`, `ResizeObserver`, `IntersectionObserver`, `requestAnimationFrame`, `addEventListener` on `document`/`window`.
+
+## `createEl` on leaf DOM builds in the main window's document
+
+**Observed**: 2026-09-26, Obsidian 1.14.2 (installer 1.14.2), Electron 43
+
+Obsidian's `enhance.js` runs in every window, and each run gives that window's `Node.prototype` a `createEl` that calls the same window's global `createEl`. So `el.createEl()` and `el.createDiv()` build the new element in the document of the window whose prototype `el` inherits — `el.constructorWin` — which is not always `el.doc`.
+
+- **Leaf DOM inherits from the main window**: every workspace item's `containerEl` comes from the main window's global `createDiv()`, and a view's `containerEl` from `leaf.containerEl.createDiv(...)`. Those elements keep main-window prototypes after the leaf moves to a popout — they pass the main window's `instanceof HTMLElement` while their `ownerDocument` is the popout's — so anything built from them with `createEl`/`createDiv` starts in the main window's document and moves into the popout's on append.
+- **Options apply before the append**: the global `createEl` creates the element, applies `cls`, `text`, `attr` and the other options, runs the callback, and only then appends it to `parent`.
+- **A `src` in `attr` loads in the wrong document**: `el.createEl('img', { attr: { src } })` in a popout starts the request in the main window's document, before the element moves. Downloads are shared only within one document (next section), so that request is not shared with a load of the same URL in the popout.
+
+**Fix**: append first, then set `src`.
+
+```ts
+// Wrong: the request starts in the main window's document
+const img = el.createEl('img', { attr: { src: url } });
+
+// Right: the element is in its final document before it loads
+const img = el.createEl('img');
+img.src = url;
+```
+
+**Diagnostic**: `el.constructorWin !== el.win` is `true` for main-built DOM inside a popout.
+
+## Image downloads are shared only within one document
+
+**Observed**: 2026-09-26, Electron 43 (Chromium 150)
+
+All of Obsidian's windows run in one renderer process, yet Chromium shares an in-flight image download — and a finished `no-store` response — only between elements of the same document. The same URL requested from another window's document is a second download.
+
+| Same URL, loaded by | Requests |
+|---|---|
+| The main window's `new Image()`, then a popout's `img` 1s later | 2 |
+| `new popoutWindow.Image()` (constructed from main-window code), then the popout's `img` | 1 |
+
+- **Build a prefetch on the element's own window**: a prefetch meant to share its download with an element must use that element's window's constructor — `new el.win.Image()` — not the module-scope `Image`, which belongs to the main window.
+- **A finished `no-store` response stays servable only while referenced**: it is served again only within its own document, and only while some element still references it. Once the last reference is dropped and a garbage collection runs, the URL is requested again.
+- **A cacheable response crosses windows, but not synchronously**: an `http` response that allows caching comes back from the HTTP cache in any window, yet the element reads `complete` false right after its `src` is set.
+
+Measured against a local server that logs how each response ended. Use a fresh URL per trial: within one document, a repeated request for the same URL is served from the earlier download. See `image-loading-quirks.md` for how downloads behave within a document.
 
 ## Cross-context observers silently fail
 
@@ -39,7 +79,7 @@ Diagnostic: `ownerDocument.defaultView.ResizeObserver !== window.ResizeObserver`
 
 ## `requestAnimationFrame` IDs are per-window
 
-`cancelAnimationFrame(id)` must be called on the same window where `requestAnimationFrame(cb)` was called — RAF IDs are scoped to their originating V8 isolate. Canceling an ID on a different window is a silent no-op.
+`cancelAnimationFrame(id)` must be called on the same window where `requestAnimationFrame(cb)` was called — RAF IDs are scoped to the window that issued them. Canceling an ID on a different window is a silent no-op.
 
 When tearing down state for a popout move, cancel all pending RAFs BEFORE nullifying the stored window reference. Otherwise, the `?? window` fallback targets the main window and the cancel does nothing — the orphaned callback fires in the old window's context.
 
@@ -56,7 +96,7 @@ this.observerWindow = null;
 
 ## Main-window RAF does not run before popout paint
 
-Each `BrowserWindow` has its own V8 isolate and its own frame scheduler. A `requestAnimationFrame` callback queued on the main window runs before the main window's paint — but does **not** block the popout's paint. If a `MutationObserver` detects a DOM change in a popout and defers work to main-window RAF, the popout renders one frame without the update, causing visible flicker.
+Each `BrowserWindow` renders on its own frame schedule, even though all windows share one renderer process. A `requestAnimationFrame` callback queued on the main window runs before the main window's paint — but does **not** block the popout's paint. If a `MutationObserver` detects a DOM change in a popout and defers work to main-window RAF, the popout renders one frame without the update, causing visible flicker.
 
 **Workaround**: For popout-visible DOM updates triggered by MutationObserver, process synchronously in the MO callback instead of deferring to RAF. MO already batches mutations internally, so the frequency is equivalent to RAF. Alternatively, use the popout's own RAF via `doc.defaultView.requestAnimationFrame`.
 
@@ -98,7 +138,7 @@ function getAllDocuments(): Document[] {
 ```
 
 - **`defaultView` guard**: Filter by `child.doc?.defaultView` to exclude documents from already-closed windows. Without this, `doc.body` may be null, causing observer setup to throw.
-- **Cross-context `instanceof`**: `child.doc instanceof Document` returns `false` because the popout's `Document` is from a different V8 isolate. The object is a real `Document` — use duck typing or skip the check.
+- **Cross-context `instanceof`**: `child.doc instanceof Document` returns `false` because the popout's `Document` comes from a different realm, with its own `Document` constructor. The object is a real `Document` — use duck typing or skip the check.
 - **Undocumented API**: `floatingSplit` is not in Obsidian's public type definitions. It has been stable across Obsidian 1.8–1.12.
 
 **Observed**: 2026-04-14, Obsidian 1.12.7
@@ -141,6 +181,13 @@ cleanupObserver(el.ownerDocument.defaultView ?? undefined);
 const win = el.ownerDocument.defaultView;
 if (win) cleanupObserver(win);
 ```
+
+## A popout closed mid-load leaves its loads unsettled
+
+**Observed**: 2026-09-25 to 2026-09-26, Electron 43 (Chromium 150)
+
+- **An `Image` never settles**: when a popout closes while an `Image` built on its window is still downloading, Chromium aborts the download, and the `Image` fires neither `load` nor `error` (none within 9s). It then reads `complete` true with `naturalWidth` 0. Code that awaits `load`/`error` hangs — bound the wait with a timeout, or abort it together with the view.
+- **Its `requestAnimationFrame` never fires**: a closed popout's `requestAnimationFrame` still returns an id and does not throw, but the callback never runs. Schedule teardown work that must complete on the main window.
 
 ## Style Settings classes in popout windows
 

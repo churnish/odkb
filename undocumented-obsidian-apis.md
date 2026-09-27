@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-25
+updated: 2026-09-27
 ---
 # Undocumented Obsidian APIs
 
@@ -52,6 +52,51 @@ DragManager registers its own `dragstart` listener on `window` in the bubble pha
 
 A plugin `dragstart` handler that calls `event.stopPropagation()` before its own `onDragStart()` call — to keep an inner element's drag from also being handled by an ancestor's listener, for instance — hides that drag from DragManager's bubble-phase `window` listener too, since `stopPropagation()` stops the event before it reaches `window`. DragManager never gets the chance to register its `dragend` cleanup, so the handler must register the same once-only `dragend` → `onDragEnd()` listener on the drag source itself. Skipping this leaves the ghost element and `is-grabbing` on `document.body` after the drop.
 
+## History stack
+
+**Observed**: 2026-09-24 to 2026-09-26, Obsidian 1.14.2 (installer 1.14.2) — read from `app.js` and the app's Electron main-process script; the popout behavior measured
+
+Obsidian keeps its own history stack, one per window, behind the patched `window.history.back()`/`forward()`/`go()` — the stack a mouse back button, Android's back gesture and Electron's `swipe`/`app-command` handling all step through. It is module-private, and there is no documented way to push an entry onto it directly. Its entries implement the public `HistoryHandler` interface, as `Menu`, `Modal` and `PopoverSuggest` do.
+
+### How it steps
+
+- **Back calls the top entry and pops nothing**: `history.back()` calls `onHistoryBack()` on the window's top entry; the entry is expected to pop itself as it closes. `forward()` calls the top entry's `onHistoryForward()` when it has one, and `go(n)` repeats either one `|n|` times.
+- **A pop removes the entry wherever it sits**: popping takes the entry out of the stack it was pushed on, even when it is not on top.
+- **The desktop main window has a base entry**: its stack starts with a permanent entry that steps the workspace's active leaf back or forward. With nothing else pushed, a back press navigates the active leaf — so an overlay that pushed no entry of its own stays on screen while the note behind it changes, or is torn down with a view that unloads.
+
+### What feeds it
+
+| Feeder | Where | Resolves through |
+|---|---|---|
+| Android back button | Android | The main window's stack. When that is empty: collapse the left sidebar, then the right one (a pinned sidebar is skipped), then step the active leaf back, then show "back again to exit" — a second press within 5s minimizes the app |
+| Mouse back/forward buttons (`button` 3/4) | Desktop, except Linux | A capture-phase `mousedown` listener on the main window: `preventDefault()`, `stopPropagation()`, then the patched `history.back()`/`forward()` |
+| Electron `swipe` (left/right) and `app-command` (`browser-backward`/`browser-forward`) | Desktop | The main process runs `history.back()`/`forward()` in that window's page — registered for popout windows too, not only the main one |
+| A leaf popout's `history.back()`/`forward()`/`go()` | Desktop | Replaced with forwarders to the main window's |
+| A leaf popout's `mousedown` | Desktop | Relayed to the main window as a copy whose `preventDefault()`/`stopPropagation()` reach the original, so the main window's back-button listener handles it |
+| A modal popout (`body.is-popout-modal`) | Desktop | Its own patched stack and its own capture-phase back-button listener |
+
+**A leaf torn into its own window does not consult its own stack for its back feeders.** Such a popout forwards its `history.back()` and its mouse back/forward presses to the MAIN window, so they resolve through the main window's stack (measured) — an entry pushed only on a leaf popout's own stack is unreachable from the very back feeders a user would expect to trigger it there. Only modal popouts, such as the settings window, keep a stack of their own.
+
+### What pushes onto it
+
+| Pusher | Pushes onto |
+|---|---|
+| `Menu` — non-native menus only | The window of the document it shows in (`activeDocument` by default) |
+| `Modal.open()` | `activeWindow` |
+| `PopoverSuggest.open()` | `activeWindow` |
+| The image lightbox | `activeWindow` |
+| The mobile tab switcher | The main window |
+
+- **An entry lands on the active window's stack, which a leaf popout never reads**: a real click in a popout makes it `activeWindow` (through the popout's `focus` listener). The native image lightbox opened by such a click pushes onto the popout's own stack, which none of the feeders above read, so a back press in that popout skips the lightbox and reaches the main window's stack instead (measured).
+- **The lightbox stays on top while it animates out**: it pops its entry only when its close animation ends, and ignores a close while already closing — so a second back press during the animation does nothing.
+- **Probe precondition**: CDP `Input.dispatchMouseEvent` does not fire the popout's `focus` event, so under CDP input `activeWindow` stays the main window and a push lands on the main stack — dispatch `focus` on the popout window first. Read `activeWindow` from the main window's realm: each popout realm has its own `activeWindow` global, which always equals that popout.
+
+### `PopoverSuggest` as a handle onto the stack
+
+`PopoverSuggest`'s `open()`/`close()` do it internally: `open()` pushes an entry onto `activeWindow`'s stack (and pushes the popover's own keymap `Scope` at the same time), `close()` pops both. A subclass that never draws anything — empty `renderSuggestion`/`selectSuggestion`, and `attachDom`/`detachDom` overridden to no-ops so `open()` appends nothing visible to the DOM — is a working handle onto the stack with no UI cost. Implement the public `HistoryHandler` interface alongside it: `onHistoryBack()` is the hook a back press calls on the top-of-stack entry. Leave out the optional `onHistoryForward()`, and a forward press with the entry on top does nothing.
+
+The popover's own scope shadows whatever key bindings were active before it, so when the entry's scope must not intercept anything, pop it immediately after `open()` returns (`app.keymap.popScope(entry.scope)`) — the entry stays on the history stack regardless, since the push and the scope are two separate operations underneath.
+
 ## Menu
 
 - **`Menu.addItem(fn)`**: Pushes the `MenuItem` to `menu.items[]` BEFORE calling `fn(item)`. During the callback, the item is already in the array — enabling synchronous reordering within the callback itself.
@@ -77,16 +122,6 @@ Observed in Obsidian 1.12.5.
 ## Plugins (`app.plugins`)
 
 - **No event system**: `app.plugins` has no events for plugin enable/disable. `workspace.on('layout-change')` does NOT reliably fire on `enablePlugin`/`enablePluginAndSave`. Polling or retry loops are the only option for detecting another plugin becoming available after startup.
-
-## PopoverSuggest and the history stack
-
-Obsidian keeps its own history stack, one per window, behind the patched `window.history.back()`/`forward()` — the stack a mouse back button, Android's back gesture and Electron's `swipe`/`app-command` handling all step through. It is module-private, and there is no documented way to push an entry onto it directly.
-
-`PopoverSuggest`'s `open()`/`close()` do it internally: `open()` pushes an entry onto `activeWindow`'s stack (and pushes the popover's own keymap `Scope` at the same time), `close()` pops both. A subclass that never draws anything — empty `renderSuggestion`/`selectSuggestion`, and `attachDom`/`detachDom` overridden to no-ops so `open()` appends nothing visible to the DOM — is a working handle onto the stack with no UI cost. Implement the public `HistoryHandler` interface alongside it: `onHistoryBack()` is the hook a back press calls on the top-of-stack entry. Leave out the optional `onHistoryForward()`, and a forward press with the entry on top does nothing.
-
-The popover's own scope shadows whatever key bindings were active before it, so when the entry's scope must not intercept anything, pop it immediately after `open()` returns (`app.keymap.popScope(entry.scope)`) — the entry stays on the history stack regardless, since the push and the scope are two separate operations underneath.
-
-**A leaf torn into its own window does not consult its own stack for its back feeders.** Such a popout forwards its `history.back()` and its mouse back/forward presses to the MAIN window, so they resolve through the main window's stack (measured) — an entry pushed only on a leaf popout's own stack is unreachable from the very back feeders a user would expect to trigger it there. Only modal popouts, such as the settings window, keep a stack of their own.
 
 ## Scope
 
