@@ -2,7 +2,7 @@
 title: Obsidian API quirks
 description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, and workarounds.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-25
+updated: 2026-09-27
 ---
 
 # Obsidian API quirks
@@ -84,11 +84,29 @@ A `.base` file's save and reload behavior depends on how it is open, and the dif
 - **A view written as a code block in a note** saves through a short-debounced rewrite of the block's own text in the host note — it never touches a `.base` file at all.
 - **A same-content reload keeps the same config object.** `QueryController.setQuery()` re-uses the existing query object when the incoming query serializes identically to what it already holds, so a round-trip that changes nothing does not invalidate an object a caller is still holding. Any other reload assigns a new query object, and the controller re-points the active view's config to it on every update regardless.
 - **The Configure view UI keeps its own reference.** Once opened, it holds the config object that was live at the time. If the file reloads underneath it into a new query object, the UI's next edit still writes to the old object, and saving from that old query hands the controller the old query back — undoing the reload.
+- **Each `set()` has a real cost.** It serializes the whole query about three times — the save function's last-written copy and the controller's identical-content check — which measured about 1ms per call against a small file (20 calls took 22ms on an M4 Pro with a 715-byte base), scaling with file size.
+- **Patching a live view's save methods observes nothing.** Replacing `save` or `onModify` on an already-constructed standalone view logged no calls, because the debounced save and the vault's modify listener hold references taken when the view was built. Read the file from disk with a direct filesystem read to see when a save lands.
 - **Multiple visible instances of the same file race independently.** Each instance debounces and flushes on its own schedule, so when two instances of the same file are visible and initializing at once, an edit made in one can be silently discarded if the other instance's shorter flush window reloads the file first. This needs two concurrently-initializing visible instances of the same file plus an edit landing inside the other's flush window — not a path an ordinary single-instance edit reaches.
 
 ### Implication
 
 A background write to an open `.base` file through `vault.process()` or `vault.modify()` races every mechanism above — it can be silently replaced by a pending in-memory save, or itself replace another instance's unflushed edit. Writing through `config.set()` on the config object the running instance already holds rides Obsidian's own save path instead, avoiding the race entirely outside the multi-instance case above.
+
+## A Bases layout switch keeps the view's data
+
+**Observed**: 2026-09-27, Obsidian 1.14.2 (read from `app.js`)
+
+A view's settings live in one data object that every layout reads, so switching a view's layout hands the same keys to the next layout.
+
+- **Own properties vs data**: `type`, `name`, `filters`, `groupBy`, `order`, `sort`, `limit` and `summaries` are properties of the view config itself. Every other key lives in its data object — the one `getAll()` returns and `set()` writes.
+- **A layout switch changes only `type`**: the Configure view page reassigns `type` on the same config object, so the data object and every key in it carry into the new layout, including keys the new layout never reads.
+- **Unknown keys round-trip**: Obsidian saves keys it does not recognize, so one view's data can hold the keys of every layout it has been, core and plugin-provided alike.
+- **Core layouts read shared names**: Cards reads `cardSize` (slider 50–800, default 200), `image`, `imageFit` and `imageAspectRatio`. Kanban reads `image`, `imageFit`, `imageAspectRatio`, `columnWidth` (200–500, default 280), `hideEmptyGroups` and `groupOrder`. Table reads `rowHeight` and `columnSize`, and List reads `markers`, `indentProperties` and `separator`. Cards and Kanban treat `imageFit: 'contain'` as contain and any other value as cover; their Cover option stores `''`.
+
+### Implication
+
+- **Never delete a key you do not own**: a view type that cleans its data against an allowlist erases every other layout's settings the moment a view is switched to it. Delete only keys your own plugin wrote.
+- **A key named like a core one is shared**: when a custom layout also reads `cardSize` or `imageFit`, the core layout reads the same value back after a switch. Dropping it as default-equal against your own default changes what the core layout shows, since its default differs.
 
 ## Bases `config.get()` returns the raw stored value
 
