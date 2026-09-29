@@ -1,8 +1,8 @@
 ---
 title: Electron CSS quirks
-description: Blink/Electron CSS rendering quirks affecting selectors, text truncation, overflow clipping, container queries, and GPU compositing.
+description: Blink/Electron CSS rendering quirks affecting selectors, text truncation, overflow clipping, container queries, GPU compositing, scroll anchoring, sub-pixel scroll offsets, and `filter` transitions from `none`.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 # Electron CSS quirks
 
@@ -331,3 +331,47 @@ Remove `z-index` from `.cm-line` elements entirely. If the pseudo-element is pos
 If vertical overlap IS needed (e.g., an underline overlapping text), there is no CSS-only fix. The stacking context breaks click-to-position. Alternatives:
 - **`pointer-events: none`** on the pseudo-element helps but does not fix the `caretRangeFromPoint` issue.
 - **JS-injected child elements** instead of pseudo-elements (avoids the stacking context requirement).
+
+## Native scroll anchoring double-counts a model-based `scrollTop` correction
+
+**Observed**: 2026-09-27, Electron 43.7.1.
+
+Chromium's scroll anchoring (`overflow-anchor: auto`, the default) moves `scrollTop` during layout when content above the visible area changes size. A script that then corrects `scrollTop` from its own layout model — "the rows above grew by N, so scroll down by N" — applies the same shift a second time.
+
+- **Measured**: 40px of growth above the visible area got +39 from native anchoring, then +36 from a model correction, so the content jumped 36px. In another run, native anchoring had already moved `scrollTop` before 46 of 78 model corrections, and the content jumped up 7px.
+- **Measure instead of predicting**: Record an on-screen element's `getBoundingClientRect().top` before the layout change and correct by how far it actually moved. The measured delta already includes whatever native anchoring did, so it never counts the shift twice.
+- **Anchor on an element that kept its size**: Holding it still holds everything below it, and a resized element above it grows upward instead of pushing the view down. When every visible element resized, the first one's top still moved only by the content above it, so its delta is still a valid correction.
+- **WebKit has no native scroll anchoring** through Safari 27.2. Feature-test with `CSS.supports('overflow-anchor', 'auto')`, which is false there.
+
+## A `scrollTop` write cancels a running smooth scroll
+
+**Observed**: 2026-09-27, Electron 43.7.1.
+
+Assigning `scrollTop` while a smooth scroll is animating stops the animation where it is, and the scroller never reaches the target.
+
+- **Measured**: A smooth `scrollTo` from 6000 to 1000 stopped at 6003 after one +5 write. The control, with no write, landed at 1000.
+- **Keyboard scrolling animates**: Home, End, Page Up/Down and Space scroll smoothly, as does `scrollIntoView({ behavior: 'smooth' })`. Home, End and Page Up/Down took 140–200ms (16–18 scroll events at 120Hz).
+- **Workaround**: Hold corrective writes from the keydown until the scroller's `scrollend`, with a timeout as a backstop, since a key that scrolls nothing fires no `scrollend`. Skip keydowns aimed at an editor or a text field: they move the caret or the editor's own scroller, not the one being corrected.
+
+## `scrollTop` lands on device pixels, so a fractional layout shift re-snaps text
+
+**Observed**: 2026-09-27, Electron 43.7.1.
+
+A box that settles at a fractional height (e.g., 316.24px) shifts everything below it by a fractional amount, but a compensating `scrollTop` write lands on the device-pixel grid: a target of 74348.64 landed at 74348.5. The residue moves the content below, and its text re-snaps by a device pixel — a visible jiggle.
+
+- **Keep the layout on whole pixels**: Round estimated sizes before they become heights or offsets, and round content-sized boxes with `calc-size()` (see below).
+- **Measured cost of fractional estimates**: Estimates that fed absolutely positioned tops produced −1.89px height corrections and tops at .83–.99, and every one of 8 correction writes landed 0.1–0.23px off target.
+
+## `calc-size()` rounds a content-sized box up to whole pixels
+
+**Observed**: 2026-09-27, Electron 43.7.1.
+
+`min-height: calc-size(max-content, round(up, size, 1px))` rounds a box's content height up to the next whole pixel without disturbing its own `height`, so it composes with `height: 100%` on a grid item stretched to its row.
+
+- **Measured** on stretched grid items with `height: 100%`: Heights went 286.28 → 287 and 371.43 → 372, rows stayed equal-height, and each item's last child kept its offset.
+- **`min-height: calc-size(auto, …)` has no effect**, and `height: calc-size(auto, …)` would replace `height: 100%`, dropping the row fill.
+- **Exclude boxes sized some other way**: An `aspect-ratio` box must keep its ratio over its content height. A `min-height` also beats an inline `height` lock, so a lock shorter than the content would stop clamping.
+- **Round an `aspect-ratio` box with `height` instead**: On a box sized by `aspect-ratio` under `height: auto`, `height: calc-size(auto, round(nearest, size, 1px))` rounds the ratio-derived height (254.797 → 255, observed 2026-09-29). Declare it after a plain `height: auto`, which WebKit keeps. An absolutely positioned box with an inline width rounds the same way. With `object-fit: contain` and an image that exactly fills the box, the edge pixels matched with and without the rounding.
+- **Cost**: Style recalc rose from 35–37ms to 44–45ms per 15,000px/s fling across a large grid, measured over three warm pairs with the stylesheet settled before each trace. Layout was unchanged.
+- **WebKit has no `calc-size()`** through Safari 27.2 and drops the declaration, so the rounding applies in Chromium only.
+- **Dart Sass passes it through** unchanged: `round(up, size, 1px)` inside `calc-size()` compiles as written.

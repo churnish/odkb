@@ -1,8 +1,8 @@
 ---
 title: Declarative settings API quirks
-description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, refresh semantics, the focused-row re-render skip, definitions that render nothing, row reuse, search indexing, and a name collision that blanks the settings pane.
+description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, refresh semantics, the re-render skip that applies only to focused control rows, definitions that render nothing, row reuse, the row-batching rule that decides every box boundary, search indexing, and a name collision that blanks the settings pane.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-07
+updated: 2026-08-18
 ---
 
 # Declarative settings API quirks
@@ -23,6 +23,7 @@ Consequences:
 
 - **Anything computed at definition time is frozen** until `update()`. A `type: 'list'` whose `items` are mapped from an array renders the array as it was at registration. Every mutation — add, delete — must call `update()` or the list silently shows stale contents.
 - **Closures stay live.** `visible` / `disabled` predicates and `render` callbacks capture references, so they read current state whenever they are invoked. It is the surrounding *structure* that is frozen, not the values the callbacks read.
+- **`render` callbacks do re-run on every tab display.** Only the definition tree is cached, not the work its callbacks do: switching away from the tab and back twice ran `render` twice and `getSettingDefinitions()` zero times. So state probed *inside* `render` — whether another plugin is installed, say — is current every time the user opens the tab, while the same probe evaluated at definition time stays frozen until `update()`.
 
 ## `refreshDomState()` does not re-read control values
 
@@ -38,25 +39,28 @@ The failure this produces is quiet and easy to miss: a cascade force-writes a si
 
 A useful nuance: controls on a **freshly mounted sub-page** do re-read `getControlValue()` even though definitions aren't rebuilt. So a cascade that writes to a control on a *different* page self-corrects when the user navigates there; only same-page writes strictly require `update()`. Using `update()` for all value-writing cascades is simpler and safe.
 
-## `update()` skips the row that holds DOM focus
+## `update()` skips a focused **control** row
 
-**Observed**: 2026-08-07, Obsidian 1.13.5 (installer 1.13.4)
+**Observed**: 2026-08-18, Obsidian 1.13.7 (installer 1.13.4)
 
-`update()` re-runs `getSettingDefinitions()` and rebuilds rendered rows from the result — but the row containing the **currently focused element is left untouched**, presumably so a re-render can't clobber a control the user is interacting with.
+`update()` re-runs `getSettingDefinitions()` and rebuilds rendered rows from the result — but a row is **left untouched** while it holds DOM focus *and* its definition carries a `control`, presumably so a re-render can't clobber a control the user is interacting with.
 
-This is invisible until a definition's `name` or `desc` depends on state, because that is the only part `update()` would have rebuilt:
+The skip is conditional, not universal. The predicate is `"control" in def && !!def.control` combined with the focused element sitting inside the row's control container. A **`render` row is therefore never skipped**: it is torn down (its cleanup function runs), rebuilt, and its control container refocused afterwards — so a button inside it survives `update()` with focus intact, and a `render` row may safely rebuild itself from its own click handler.
+
+This is invisible until a control definition's `name` or `desc` depends on state, because that is the only part `update()` would have rebuilt:
 
 | What triggered `update()` | Rebuilt? |
 |---|---|
 | A sibling row's `desc` | Yes |
-| The focused row's own `desc` | **No** |
-| The focused row's `desc`, after focus moves away and `update()` runs again | Yes |
+| The focused **control** row's own `desc` | **No** |
+| The focused **`render`** row's own `desc` | Yes |
+| The focused control row's `desc`, after focus moves away and `update()` runs again | Yes |
 
-The trap is that a user clicking a control **leaves that control focused**, and the natural place to call `update()` is that control's own `setControlValue`. So a state-dependent `desc` on the very row the user just toggled is the one case that never refreshes — it stays stale for the rest of the settings session, since nothing else moves focus and re-runs `update()`.
+The trap is that a user clicking a control **leaves that control focused**, and the natural place to call `update()` is that control's own `setControlValue`. So a state-dependent `desc` on the very control row the user just toggled is the one case that never refreshes — it stays stale for the rest of the settings session, since nothing else moves focus and re-runs `update()`.
 
-Reproduction: give a toggle a `desc` built from its own key's value, click it, and read the row's description. The stored value flips, the group `visible` predicates re-apply, and the description does not change.
+Reproduction: give a toggle a `desc` built from its own key's value, click it, and read the row's description. The stored value flips, the group `visible` predicates re-apply, and the description does not change. That repro uses a control row, which is why the finding first read as universal.
 
-- **Don't make a row's own `name`/`desc` depend on that row's control value.** State the text unconditionally, or move the conditional part to a sibling row or a group the predicate can hide.
+- **Don't make a control row's own `name`/`desc` depend on that row's control value.** State the text unconditionally, move the conditional part to a sibling row or a group the predicate can hide, or make it a `render` row and mutate the text directly.
 - **A sibling row's text is safe** — cascades that reword a *different* row do rebuild.
 - Nothing here affects `visible`/`disabled`; those re-apply on the focused row normally.
 
@@ -172,11 +176,23 @@ Two related migration hazards when moving imperative settings UI to the declarat
 - A page's `items` is `SettingDefinitionItem[]`, which does admit groups and lists.
 - `SettingDefinitionBase` has **no `icon` field**. Per-row icons require a `render` callback that inserts the icon into `setting.nameEl`.
 
+### Consecutive plain rows fold into one box
+
+The renderer batches as it walks a page's `items`. Each run of consecutive plain rows is collected into a **synthetic headingless group**, and any explicit `type: 'group'` or `type: 'list'` closes that run and starts a new batch.
+
+This one rule decides every box boundary on a settings page:
+
+- A group or list **ends the current box** regardless of what its `visible` predicate returns — a hidden group still closes the batch.
+- A lone row's box **depends on its neighbours, not on itself**. Wrapping it in an explicit `type: 'group'` with no `heading` is what guarantees it a box of its own, so a later reorder cannot silently merge it into the rows above. The wrapper is load-bearing, not decorative.
+- Rows meant to read as belonging to a master toggle must be placed **before the next group**, not after it. Placement decides box membership; there is no indentation that would override it.
+
+A headingless group is legal and renders correctly. `heading` is optional on `SettingDefinitionGroup`, and the re-render path calls `setHeading("")`, which detaches the element rather than leaving an empty one behind.
+
 ### Indented sub-settings split the section they sit in
 
 There is no "child row" concept. A cluster of settings that only applies while a parent toggle is on has to be its own sibling `type: 'group'` with a `visible` predicate, styled through `cls` to read as a continuation of the row above it.
 
-The consequence is structural: ungrouped top-level rows are rendered into implicit boxes, and a group placed among them **ends the current box**. When the sub-group is hidden, the rows before and after it stay in two separate boxes with a visible gap between them.
+The consequence is structural, and follows from the batching rule above: when the sub-group is hidden, the rows before and after it stay in two separate boxes with a visible gap between them.
 
 ```
 Row A ─┐
