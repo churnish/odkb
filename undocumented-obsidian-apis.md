@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-27
+updated: 2026-09-29
 ---
 # Undocumented Obsidian APIs
 
@@ -13,6 +13,57 @@ For comprehensive type definitions of Obsidian's internal APIs, search `dist/typ
 ## App
 
 - **`app.debugMode`**: Boolean. Toggles Obsidian's internal debug mode, which surfaces extra logging.
+
+### `app.getObsidianUrl(file)` encodes the path once
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2), read from `app.js`
+
+`app.getObsidianUrl(file)` builds `obsidian://open?vault=…&file=…`, passing the file path through `encodeURIComponent` exactly once.
+
+- **Only Markdown files lose their extension**: it strips `.md` from a Markdown file's path; any other file keeps its extension.
+- **Never decode a second time**: `URLSearchParams.get('file')` already decodes the path once. A second `decodeURIComponent` throws `URIError` on a literal `%` in a file name, and turns a name's own `%20` into a space.
+- **Resolving the file back**: try the path plus `.md` first, then the path as given.
+
+## Bases query controller
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+Every rendered base — standalone, embedded with `![[File.base]]`, or written as a `base` code block — is driven by a query controller. For its settings menu, see "Bases view settings menu" below. For why a plugin reload leaves a stale view in place, see `obsidian-api-quirks.md`.
+
+### One config object per view
+
+`controller.query.views` holds one distinct config object per view in the file, and `controller.view.config` is identity-equal to one of them. Probed on a two-view base: two entries, two distinct objects, the live view's config among them.
+
+- **A view switch always changes `config` identity**: the view showing after a switch holds a different config object from the one before it — in standalone bases and embeds alike.
+- **Identity alone tells views apart**: code that needs to know which of a base's views a config belongs to can compare config objects, with no view id.
+
+### Finding every controller
+
+Walking `_children` — each `Component`'s list of child components — down from every `leaf.view` reaches every controller:
+
+- **Every form**: standalone bases, embedded bases and code block bases.
+- **Hidden ones too**: in Reading view, and in the editor Obsidian keeps rendered but hidden behind it — plus a detached controller that was still loaded.
+- **Except on a canvas**: a canvas's embeds hang off `leaf.view.canvas.nodes` → `node.child`, not off `_children`.
+
+Measured: the walk across 19 leaves took 0.4ms.
+
+### Replacing a view in place
+
+`update()` builds a new view only when the live view's `type` differs from its config's. To force a rebuild — of a view left over from an earlier load of the plugin, say — run the steps Obsidian's own `selectView` runs, in the same order:
+
+```js
+controller.removeChild(controller.view);
+controller.view = null; // nulling the view is what makes update() build a new one
+controller.viewContainerEl.empty();
+controller.update();
+```
+
+Measured on macOS desktop after a real plugin reload:
+
+- **The swap takes**: the new view was an instance of the current module's class, the old one unloaded, and 8 swaps raised no errors.
+- **The rebuilt view starts at the top**: two views scrolled to 1380px and 1400px both came back at 0.
+- **Ephemeral state carries the position**: bracketing the swap with `getEphemeralState()` before and `setEphemeralState(state)` after brought a popout scrolled to 1195px back with its anchor item at exactly its saved 28px offset. During an in-place reload, though, the old view's scroll drifts before the plugin's own code can snapshot it — see `obsidian-api-quirks.md`.
+- **A hidden view gets no data**: Bases feeds a view in the hidden editor behind Reading view no data at all. Rebuilt views there had `data` unset and rendered nothing; switching the note to Live Preview then rendered 20 and 2 items in the same views.
 
 ## Bases view settings menu (`viewMenu`)
 
@@ -119,9 +170,60 @@ Obsidian's built-in file explorer uses these section names for folder context me
 
 Observed in Obsidian 1.12.5.
 
+## MetadataCache (`app.metadataCache`)
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2), read from `app.js`
+
+- **`getBacklinksForFile(file)` walks the whole vault**: every call walks every reference in the vault, so calling it once per file costs one whole-vault walk per file.
+- **`iterateAllRefs(callback)` visits every reference once**: it calls back with `(sourcePath, ref)` for each Markdown file's frontmatter links, links and embeds, then for every canvas's references.
+- **One walk can index a whole batch**: resolving each `ref.link` as `getFirstLinkpathDest(getLinkpath(ref.link), sourcePath)` reproduces `getBacklinksForFile`'s own resolution, and each file's sources come out in the same first-seen order `getBacklinksForFile` reports.
+- **`resolvedLinks` is not a substitute**: its sources are ordered by when each file was resolved, not by the walk, and it lags edits behind an async queue.
+
+```ts
+// One walk for a batch of files: target path → source paths, in first-seen order
+const sourcesByTarget = new Map<string, string[]>();
+app.metadataCache.iterateAllRefs((sourcePath, ref) => {
+  const target = app.metadataCache.getFirstLinkpathDest(getLinkpath(ref.link), sourcePath);
+  if (!target || !batchPaths.has(target.path)) return;
+  const sources = sourcesByTarget.get(target.path) ?? [];
+  if (!sources.includes(sourcePath)) sources.push(sourcePath);
+  sourcesByTarget.set(target.path, sources);
+});
+```
+
 ## Plugins (`app.plugins`)
 
-- **No event system**: `app.plugins` has no events for plugin enable/disable. `workspace.on('layout-change')` does NOT reliably fire on `enablePlugin`/`enablePluginAndSave`. Polling or retry loops are the only option for detecting another plugin becoming available after startup.
+**Observed**: 2026-09-25 to 2026-09-29, Obsidian 1.14.2 (installer 1.14.2) — the event order measured during an in-place reload, the call sites read from `app.js`
+
+- **`changed` fires on enable and disable**: `app.plugins` is an `Events` emitter. It triggers `changed` through a 0ms debounce after `enablePlugin()` succeeds (app.js 1.14.2 L171423) and after `disablePlugin()` unloads a plugin (L171442), among other call sites. The event carries no arguments, so a listener re-checks the plugin it is waiting for — no polling needed. During an in-place reload one fires after the disable and one after the enable; see `obsidian-api-quirks.md` for where they land relative to the plugin's stylesheet.
+- **`workspace.on('layout-change')` does NOT reliably fire** on `enablePlugin`/`enablePluginAndSave`.
+
+## `requestUrl` on desktop
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+On desktop, `requestUrl` runs in Electron's main process. The renderer sends each request as `require('electron').ipcRenderer.send('request-url', id, request)` and takes the answer on `ipcRenderer.once(id, …)` (app.js 1.14.2 L49776–49793). On iOS it is a native Capacitor call instead — see `ios-webkit-quirks.md`.
+
+- **Invisible to the page's network tools**: the page's CDP Network panel and network throttling never see these requests.
+- **Logging every request**: `send` lives on the prototype, so an own-property wrapper on the `ipcRenderer` instance sees every call, and `delete ipc.send` restores the original. It is the only per-request view available.
+- **Settle times**: the wrapper can register its own `ipc.once(id, …)` per request and record when it settled and with what status. A start and an end per request give the in-flight count at every moment — enough to check a cap on concurrent downloads.
+- **Popout requests included**: plugin code runs in the main window's realm, so the wrapper also sees requests made on behalf of a popout.
+- **Precondition**: desktop only. Mobile has no IPC transport to wrap.
+
+```js
+const ipc = require('electron').ipcRenderer;
+const send = ipc.send; // the prototype's method
+ipc.send = function (channel, id, request, ...rest) {
+  if (channel === 'request-url') {
+    const startedAt = performance.now();
+    ipc.once(id, (_event, ...reply) => {
+      console.log(request, startedAt, performance.now(), reply);
+    });
+  }
+  return send.call(this, channel, id, request, ...rest);
+};
+// Restore the prototype's method with `delete ipc.send`
+```
 
 ## Scope
 

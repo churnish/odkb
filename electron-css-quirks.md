@@ -185,6 +185,34 @@ The problem compounds when many invisible elements stack at the same position. E
 }
 ```
 
+## A `filter` transition from `none` runs `invert()` through gray
+
+**Observed**: 2026-09-25, Electron 43.7.1; also desktop Safari, version not recorded
+
+A `filter` transition from `none` pads `none` with the identity of each function in the other list, and the identity of `invert` is `invert(0)`. So `none` → `invert(1) brightness(0.5) invert(1)` animates both inverts through `invert(0.5)` — a gray flash — while an explicit `invert(1) brightness(1) invert(1)` rest state keeps them at 1 and animates only `brightness`.
+
+- **Measured** halfway through a 400ms linear transition, in desktop Safari and in Chromium, in a hidden window opened from Obsidian.
+- **`none` is safe without `invert`**: `brightness` and `blur` pad to their rest values, so a chain without `invert` can start from `none`.
+- **Precondition for sampling a transition**: Safari throttles a background tab's animation clock, and its mid-transition value never advanced there. Sample in a hidden Electron window with `backgroundThrottling: false`, or in a foreground tab.
+
+```scss
+// Wrong: both inverts animate up from invert(0), through gray
+.photo {
+  filter: none;
+  transition: filter 400ms;
+}
+
+// Right: the rest state lists the same functions, so only brightness moves
+.photo {
+  filter: invert(1) brightness(1) invert(1);
+  transition: filter 400ms;
+}
+
+.photo.is-dimmed {
+  filter: invert(1) brightness(0.5) invert(1);
+}
+```
+
 ## `-webkit-line-clamp` ignores block margins
 
 **Discovered**: 2026-03-09 on Electron 39.5.

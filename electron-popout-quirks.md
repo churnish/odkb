@@ -1,8 +1,8 @@
 ---
 title: Electron popout window quirks
-description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows — observers, animation frames, hit-testing, element creation and image downloads.
+description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows — observers, animation frames, hit-testing, element creation, image downloads and cleared image sources.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-27
+updated: 2026-09-29
 ---
 
 # Electron popout window quirks
@@ -61,6 +61,18 @@ All of Obsidian's windows run in one renderer process, yet Chromium shares an in
 - **A cacheable response crosses windows, but not synchronously**: an `http` response that allows caching comes back from the HTTP cache in any window, yet the element reads `complete` false right after its `src` is set.
 
 Measured against a local server that logs how each response ended. Use a fresh URL per trial: within one document, a repeated request for the same URL is served from the earlier download. See `image-loading-quirks.md` for how downloads behave within a document.
+
+## A cleared `img` in a popout reads back the opener's URL
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2), Electron 43.7.1
+
+A popout is an `about:blank` document that takes its opener's base URL. After `img.src = ''`, the `src` getter returns `app://obsidian.md/index.html`, while the popout's own `location.href` is `about:blank` (measured).
+
+- **Test the attribute**: detect a cleared image with `!img.getAttribute('src')`. NEVER compare the `src` getter with a page URL.
+- **Comparing with the owner window's URL fails**: a guard that compares `img.src` with the popout's own `location.href` never matches, so every cleared-image check built that way fails in popouts.
+- **Comparing with the main window's URL passes by accident**: the main window's `location.href` is the base URL the popout inherited, so that comparison works without being correct.
+
+Precondition for reproducing it: an image in a popout. In the main window both URLs are the same, so either comparison passes there.
 
 ## Cross-context observers silently fail
 

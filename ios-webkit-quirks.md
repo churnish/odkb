@@ -1,8 +1,8 @@
 ---
 title: iOS WebKit quirks
-description: Platform-specific bugs in iOS WebKit (WKWebView) affecting content-visibility, IntersectionObserver, CSS scroll-state(), compositor layer shifts, touch hit-testing, long-press image drag, and click synthesis.
+description: Platform-specific bugs in iOS WebKit (WKWebView) affecting content-visibility, IntersectionObserver, CSS scroll-state(), compositor layer shifts, touch hit-testing, long-press image drag, and click synthesis — plus hover media queries on iPad and the native requestUrl transport.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-28
+updated: 2026-09-29
 ---
 
 # iOS WebKit quirks
@@ -123,3 +123,39 @@ Calling `preventDefault()` on a non-passive `touchstart` listener (even with `ca
 iPadOS does not support the CSS `cursor` property (except `text`). Apple locks cursor appearance at the system level — no web API workaround exists. Custom cursors (e.g., `cursor: col-resize` on drag handles) have no effect.
 
 **Observed**: 2026-03-09, iPadOS 18.
+
+## An iPad with a hover-capable input matches `any-hover`
+
+**Observed**: 2026-09-25, iPadOS, version not recorded — an iPad Air M3, in Obsidian
+
+| Media query | iPad with a hover-capable input |
+|---|---|
+| `(any-hover: hover)` | Matches |
+| `(any-pointer: fine)` | Matches |
+| `(hover: hover)` | No match |
+| `(pointer: fine)` | No match |
+| `(pointer: coarse)` | Matches |
+
+The probe does not say which input made the `any-*` queries match — a hovering Apple Pencil or a trackpad — so the claim that either one makes `any-hover` match on iPadOS is confirmed for at least one of the two. An iPhone matches none of the hover or fine queries.
+
+- **`any-hover` does not rule out touch**: a rule or check that gates touch behavior on `any-hover` also governs finger input on such an iPad. A script check that reads the same two `any-*` queries through `matchMedia()` is true there too.
+- **Name touch states in every hover lock**: when an `@media (any-hover: hover)` block locks behavior behind a desktop hover state, a state the touch tap path sets must also be named inside it, or the behavior stays locked on such an iPad.
+
+See `obsidian-ui-internals.md` for how Obsidian's own press feedback treats a trackpad hover and a Pencil hover on a tablet.
+
+## `requestUrl` is a native call on iOS, not WKWebView networking
+
+**Observed**: 2026-09-25, iOS, version not recorded; the `app.js` names are from Obsidian 1.14.2
+
+On iOS, Obsidian's `requestUrl` is the Capacitor `App.requestUrl` native call (`Sw = registerPlugin('App')` in `app.js`), not a WKWebView fetch.
+
+- **Outside the page's cache and tools**: it neither shares the page's HTTP cache nor appears in the Web Inspector network panel.
+- **Several full-size copies per response**: the body crosses the native bridge as base64 text, which `app.js`'s `wb` turns back into bytes through `atob`, a char-by-char `Uint8Array` fill and its `ArrayBuffer`. An image therefore passes through several full-size copies in the JS heap before the caller can even build a `Blob` from it.
+- **Failure messages**: `Request failed. The request timed out.` after about 60s, and `Request failed. The network connection was lost.`
+- **No patching from the console**: a Capacitor plugin object is a Proxy whose get trap returns a fresh wrapper on every read, so its methods cannot be monkey-patched from the console. Timing iOS requests needs instrumentation built into the plugin itself.
+
+On desktop, `requestUrl` is an IPC call to Electron's main process instead — see `undocumented-obsidian-apis.md`.
+
+### Telling a memory kill from a crash
+
+A memory kill leaves a `JetsamEvent-…ips` file under Settings → Privacy & Security → Analytics & Improvements → Analytics Data, naming the killed process. A genuine crash leaves a report named after the app instead.

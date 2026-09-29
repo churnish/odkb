@@ -1,8 +1,8 @@
 ---
 title: Obsidian UI internals
-description: How native Obsidian UI works under the hood — the image lightbox's drag panning, double-click zoom, loading and focus, the test that classes mouse events as touch-made, mobile press feedback, safe-area insets under mobile emulation, and Cards view's failed-cover retry.
+description: How native Obsidian UI works under the hood — the image lightbox's drag panning, double-click zoom, touch gestures and swipe navigation, loading and focus, the test that classes mouse events as touch-made, mobile press feedback, safe-area insets under mobile emulation, and Cards view's failed-cover retry.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-27
+updated: 2026-09-29
 ---
 # Obsidian UI internals
 
@@ -28,6 +28,20 @@ Pointer capture makes the swallow unnecessary for that case: in Chromium, the `c
 **Observed**: 2026-09-24, Obsidian 1.14.2 (installer 1.14.2), read from `app.js`
 
 - **Touch-made double-clicks are rejected**: a `dblclick` on the displayed image zooms, unless the lightbox opened under 300ms ago or the touch-synthesis test (see "Touch-synthesized mouse events") classes the event as touch.
+
+### Touch gestures and swipe navigation
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2), read from `app.js`
+
+In 1.14.2's `app.js` the lightbox is class `PF`, its constructor near L97340.
+
+- **One pointer-event system**: horizontal swipe navigation, drag-down dismiss, pinch-to-close and double-tap zoom all run on one pointer-event system that branches on `pointerType === 'touch'`. A touch double-tap zooms through it, not through the `dblclick` handler above, which rejects touch-made events.
+- **Arming a swipe**: a swipe arms once `|dx| > 20 && |dx| > 2.5|dy|`. While zoomed, it arms only while the drag pulls the image away from an edge it already sits at (`checkEdges`, 10px tolerance).
+- **Committing**: a release commits the step at `|v| > 0.4` px/ms — while zoomed, only if `|dx|` also exceeds 10% of the width — or at `|dx|` over 33% of the width. Anything less springs back over 200ms.
+- **The slide**: the outgoing wrapper slides to ±(width + 50) over `max(80, round(300 * (1 - |offset| / (width + 50))))` ms, while the incoming one slides in from ∓20% and fades from opacity 0 to 1 over 250ms, both on `cubic-bezier(0.4, 0, 0.22, 1)`.
+- **Arrow keys swap instantly, on every platform**: the container's `keydown` listener (see "Keyboard and focus" below) has no platform gate, and an arrow step skips the slide.
+
+Every image in the set starts downloading at open — see "Loading" below.
 
 ### Loading: the lightbox never streams
 

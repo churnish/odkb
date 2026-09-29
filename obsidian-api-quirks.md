@@ -1,8 +1,8 @@
 ---
 title: Obsidian API quirks
-description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, and workarounds.
+description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, what a plugin reload leaves running, and workarounds.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-27
+updated: 2026-09-29
 ---
 
 # Obsidian API quirks
@@ -92,6 +92,18 @@ A `.base` file's save and reload behavior depends on how it is open, and the dif
 
 A background write to an open `.base` file through `vault.process()` or `vault.modify()` races every mechanism above — it can be silently replaced by a pending in-memory save, or itself replace another instance's unflushed edit. Writing through `config.set()` on the config object the running instance already holds rides Obsidian's own save path instead, avoiding the race entirely outside the multi-instance case above.
 
+## Add view creates a `table` view first
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+A view added through Obsidian's own Add view is created as `type: table`, the default layout, and the user picks another layout afterwards. That switch is an ordinary config edit, so it reaches disk only when the debounced save flushes (see "How an open `.base` saves and reloads" above). Until then the `.base` file still reads `table`.
+
+- **A file-reading classifier sees the stale type**: code that reads the file to decide whether a view is one of its own skips the new view. Measured: a plugin's first-time setup for the new view, keyed on the file, landed 2058ms after the type switch.
+- **Classify from the in-memory config**: whenever the answer feeds a render, read the view's type from its live `config`, NEVER from the file.
+- **Not every new view passes through `table`**: a view written with its target type from the start — in a `.base` file a plugin creates itself, say — and one made with Duplicate view, which copies the source view's type, never do.
+
+For the data loss a `vault.process()` write risks in the same window, see "Known race condition" above.
+
 ## A Bases layout switch keeps the view's data
 
 **Observed**: 2026-09-27, Obsidian 1.14.2 (read from `app.js`)
@@ -110,9 +122,10 @@ A view's settings live in one data object that every layout reads, so switching 
 
 ## Bases `config.get()` returns the raw stored value
 
-> Read from `app.js` in Obsidian **1.14.2**. An earlier note, observed on 1.12.1 (installer 1.11.4), said `get()` fell back to the schema default; 1.14.2 does not.
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2), read from `app.js`. An earlier note, observed on 1.12.1 (installer 1.11.4), said `get()` fell back to the schema default; 1.14.2 does not.
 
-- **No fallback**: `BasesViewConfig.get(key)` returns `data?.[key]`, so a key the view does not store reads `undefined`. `getAll()` returns the live `data` object, or a fresh `{}` while nothing is stored.
+- **No fallback**: `BasesViewConfig.get(key)` returns `data?.[key]`, so a key the view does not store reads `undefined`. `getAll()` returns `this.data || {}` (app.js 1.14.2 L136285): the live `data` object, or a fresh `{}` while nothing is stored.
+- **`set(key, null)` deletes the key**: `set()` runs `null === t ? delete this.data[e] : (this.data[e] = t), this.query.save()` (L136311), so `null` is the only value that removes a key — see "How an open `.base` saves and reloads" above for where the save goes. A patch format that uses `null` for "remove this key" therefore applies through `set()` as is, and a test stand-in for the config matches Obsidian only if its own `set(key, null)` deletes and its `getAll()` returns the live object.
 - **Schema defaults live in the settings UI only**: each control in the view settings menu shows `config.get(key) ?? option.default`. A reader that wants the same value for an absent key must apply its own default.
 
 ### Implication for dynamic defaults
@@ -143,3 +156,47 @@ No `Bases*Option` type — nor the shared `BasesOption` base interface, nor `Bas
 - **Re-run trigger**: after every control's own `set(key, value)` call, Obsidian calls `updateHiddenOptions()`, which re-invokes `shouldHide()` for every control across all groups in the panel — not just the control that changed.
 - **Group auto-hide**: for a `"group"`-type control that isn't itself hidden by its own `shouldHide()`, `updateHiddenOptions()` also hides the group when every one of its items is hidden — the group stays visible only while at least one item inside it is.
 - **Groups cannot nest**: `BasesAllOptions` is `BasesOptions | BasesOptionGroup<BasesOptions>` — a group's `items` are typed as `BasesOptions[]`, the leaf-option union, never `BasesAllOptions[]`. A group cannot contain another group.
+
+## A plugin reload leaves its open Bases views running
+
+**Observed**: 2026-09-25, Obsidian 1.14.2 (installer 1.14.2)
+
+`app.plugins.disablePlugin()` followed by `enablePlugin()` does re-evaluate `main.js` — module-level state is new afterwards — but every open Bases view the plugin registered stays in place, still running the previous module's code.
+
+- **Nothing rebuilds a Bases view**: `registerBasesView` (app.js 1.14.2 L170695) only adds to the Bases plugin's `registrations` map, and the plugin's unload only deletes that entry. `QueryController.update()` (L147133) builds a new view only when the config's `type` differs from the live view's, and a reload changes no type.
+- **Ordinary views are rebuilt**: the workspace rebuilds every leaf of a plugin view type registered with `registerView` on `view-registered`/`view-unregistered` (L167310).
+- **Diagnostic trap**: a stale open view reads exactly like a reload that never re-read `main.js`. The reload did re-read it; the open view kept the old code.
+- **Confirming every view runs the current build**: collect the views reachable from the leaves (see "Finding every controller" in `undocumented-obsidian-apis.md`) and check that they share one constructor — or, where several view classes extend one shared parent class, one parent class: `Object.getPrototypeOf(Object.getPrototypeOf(view)).constructor`. A view left from the previous load carries a different one.
+
+To rebuild the stale views, see "Replacing a view in place" in `undocumented-obsidian-apis.md`.
+
+### What triggers an in-place reload
+
+Obsidian never watches `main.js` itself: the plugin manager's `raw` handler reacts only to an enabled plugin's `data.json`. An in-place reload — a disable, then an enable, without restarting the app — comes only from:
+
+- **`installPlugin`**, on install AND update (L171688): it runs `disablePlugin`, then `enablePlugin(id, true)`, when the plugin is loaded.
+- **The CLI's `plugin:reload`**.
+- **The Restricted mode toggle**.
+- **The plugin's own toggle** in the Community plugins settings.
+- **Third-party plugins** such as Hot Reload.
+
+When a plugin reloads in place on an iPad, the likely trigger is Hot Reload itself (unconfirmed). It is not desktop-only, it tracks plugin folders that contain `.git`, and on mobile it needs only the vault `raw` event, which fires for whatever iOS's native file watcher reports. When it fires, it shows a `Plugin "<id>" has been reloaded` notice.
+
+### The plugin's stylesheet is missing for part of the reload
+
+During an in-place reload the plugin's stylesheet is absent from the disable until after `onload` resolves:
+
+- **Removed first**: `Component.unload` (L53915) runs registered cleanups last-registered first, then `onunload()`. `loadCSS` registers the stylesheet's `detach()` after `onload`, so the stylesheet is gone before the cleanups `onload` registered run, and before `onunload()`.
+- **Inserted last**: `loadPlugin` runs `load()`, then `loadCSS()`.
+
+Measured, with the `changed` events of `app.plugins` (see `undocumented-obsidian-apis.md`):
+
+| Time | Event |
+|---|---|
+| 825ms | Stylesheet removed |
+| 893ms | `changed` from the disable, before the new module exists |
+| 953ms | Stylesheet inserted |
+| 996ms | `changed` from the enable, with the stylesheet present |
+
+- **Rebuild on the first `changed`, not in `onload`**: the first `changed` a freshly loaded module can hear is the enable's, and the stylesheet is back by then. A view rebuilt while it is missing lays out unstyled — measured: a view that sizes its first render from layout filled only one batch (20 items, content 2.1 panes tall) instead of 50, and stayed that way until scrolled.
+- **Scroll drifts while unstyled**: one open view's scroll went from 1400px to 3669px while the stylesheet was gone, and a rebuild that carried its position over landed at 1836px. Because the stylesheet goes first on unload, only a snapshot taken before the disable starts sees the styled layout.
