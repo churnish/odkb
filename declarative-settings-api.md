@@ -1,10 +1,9 @@
 ---
 title: Declarative settings API quirks
-description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, refresh semantics, the re-render skip that applies only to focused control rows, definitions that render nothing, row reuse, the row-batching rule that decides every box boundary, search indexing, and a name collision that blanks the settings pane.
+description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, the keys that match rows across renders, refresh semantics, the re-render skip that applies only to focused control rows, definitions that render nothing, row reuse, the row-batching rule that decides every box boundary, where a row's icon renders, search indexing, and a name collision that blanks the settings pane.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-18
+updated: 2026-10-15
 ---
-
 # Declarative settings API quirks
 
 Obsidian 1.13 added a declarative settings API: a `PluginSettingTab` overrides `getSettingDefinitions()` and returns a tree of definitions instead of building rows imperatively in `display()`. The framework renders the tree, binds each `control` to a settings key, and indexes every row for global settings search.
@@ -24,6 +23,22 @@ Consequences:
 - **Anything computed at definition time is frozen** until `update()`. A `type: 'list'` whose `items` are mapped from an array renders the array as it was at registration. Every mutation — add, delete — must call `update()` or the list silently shows stale contents.
 - **Closures stay live.** `visible` / `disabled` predicates and `render` callbacks capture references, so they read current state whenever they are invoked. It is the surrounding *structure* that is frozen, not the values the callbacks read.
 - **`render` callbacks do re-run on every tab display.** Only the definition tree is cached, not the work its callbacks do: switching away from the tab and back twice ran `render` twice and `getSettingDefinitions()` zero times. So state probed *inside* `render` — whether another plugin is installed, say — is current every time the user opens the tab, while the same probe evaluated at definition time stays frozen until `update()`.
+
+## Rows are matched across renders by key
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 (read from `app.js`)
+
+When `update()` rebuilds a page, the renderer matches each new definition to an already-rendered row by a key, and a match reuses that row's element (see "The row element is reused across renders" below).
+
+| Definition | Key, first present wins |
+|---|---|
+| Row | `id`, `control.key`, `name`, its index among its rendered siblings |
+| Page row | `id`, `name`, its index |
+| Group or list | `id`, `heading`, its index |
+
+- **`id` is the explicit key**: the 1.14.0 changelog adds an optional `SettingDefinitionItem#id`, "like `<div key={key} />` in React", for sibling settings that share a name. The npm typings may not declare it yet (1.14.4's do not), so its absence from `obsidian.d.ts` is no sign it is unsupported.
+- **Colliding siblings log an error**: two siblings with one key log `duplicate setting key "…"`, which the message says "may cause unexpected behavior when re-rendering". Two rows with the same `name` and no control collide this way until each gets an `id`.
+- **A page's path is its `id ?? name`**: navigating into a sub-page matches each step of the path by it, and two sibling pages sharing one log `Settings: duplicate page id …`. An `id` keeps the path stable when the page's `name` changes.
 
 ## `refreshDomState()` does not re-read control values
 
@@ -174,7 +189,16 @@ Two related migration hazards when moving imperative settings UI to the declarat
 
 - `SettingDefinitionGroup.items` is typed `SettingGroupItem[]` = `SettingDefinition | SettingDefinitionPage`. **A group cannot contain another group or a list.** Pages *can* nest inside groups.
 - A page's `items` is `SettingDefinitionItem[]`, which does admit groups and lists.
-- `SettingDefinitionBase` has **no `icon` field**. Per-row icons require a `render` callback that inserts the icon into `setting.nameEl`.
+
+### A row's `icon` renders only inside a list
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 (read from `app.js`)
+
+The typings declare no `icon` on a setting definition, yet the renderer reads one in a single place:
+
+- **List rows only**: for every row of a `type: 'list'`, the renderer sets the row's icon to `def.icon`, which counts only on a row with no `control` and no `render` — an `action` row or a plain named row.
+- **Empty slots hide together**: every row of a list gets an icon slot, and a list where no row carries an icon takes `mod-no-icon`, which hides them all.
+- **Ignored everywhere else**: a top-level row, a row in a `type: 'group'`, and a `control` or `render` row in any container never show `def.icon`. Such a row still needs a `render` callback that inserts the icon into `setting.nameEl`.
 
 ### Consecutive plain rows fold into one box
 

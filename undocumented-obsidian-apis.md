@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-29
+updated: 2026-10-15
 ---
 # Undocumented Obsidian APIs
 
@@ -148,6 +148,30 @@ Obsidian keeps its own history stack, one per window, behind the patched `window
 
 The popover's own scope shadows whatever key bindings were active before it, so when the entry's scope must not intercept anything, pop it immediately after `open()` returns (`app.keymap.popScope(entry.scope)`) — the entry stays on the history stack regardless, since the push and the scope are two separate operations underneath.
 
+## MarkdownRenderer from the DevTools console
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 (Electron 43.7.7)
+
+`require('obsidian')` throws in the DevTools console, so a probe cannot import `MarkdownRenderer` or `Component`. An open Markdown leaf reaches both:
+
+- **The static `render` is inherited**: `leaf.view.previewMode` is a `MarkdownPreviewView`, whose class extends `MarkdownRenderer`, so `leaf.view.previewMode.constructor.render(app, markdown, el, sourcePath, component)` is `MarkdownRenderer.render`. It runs the same parser and sanitizer as Reading view. `previewMode` exists while the leaf is in editing mode too.
+- **`Component` is on the view's prototype chain**: the first prototype up from `leaf.view` that owns both `load` and `addChild` has `Component` as its `constructor`.
+- **Read `innerText` from an attached element**: `innerText` honors CSS (`display: none`, `visibility: hidden`, the `hidden` attribute) only for an element in a rendered document; on a detached one it returns all the text. Measured: `a <span style="display:none">HID</span> b` read `a HID b` from a detached container and `a b` once it was attached off-screen.
+
+```js
+const leaf = app.workspace.getLeavesOfType('markdown').find((l) => l.view?.previewMode);
+let proto = Object.getPrototypeOf(leaf.view);
+while (!Object.hasOwn(proto, 'load') || !Object.hasOwn(proto, 'addChild')) proto = Object.getPrototypeOf(proto);
+const component = new proto.constructor();
+component.load();
+const el = document.body.createDiv();
+el.style.cssText = 'position: fixed; left: -10000px';
+await leaf.view.previewMode.constructor.render(app, '**a** <span hidden>b</span>', el, '', component);
+console.log(el.innerText); // 'a'
+el.remove();
+component.unload();
+```
+
 ## Menu
 
 - **`Menu.addItem(fn)`**: Pushes the `MenuItem` to `menu.items[]` BEFORE calling `fn(item)`. During the callback, the item is already in the array — enabling synchronous reordering within the callback itself.
@@ -190,6 +214,29 @@ app.metadataCache.iterateAllRefs((sourcePath, ref) => {
   sourcesByTarget.set(target.path, sources);
 });
 ```
+
+### `computeMetadataAsync(buffer)` parses any text
+
+**Observed**: 2026-10-13, Obsidian 1.14.4; re-run 2026-10-15
+
+- **No note needed**: `app.metadataCache.computeMetadataAsync(arrayBuffer)` runs the metadata worker on UTF-8 bytes and resolves with a `CachedMetadata`-shaped object — `sections`, `tags`, `links`, `embeds`, `headings` and the rest, a key left out when the text holds none of it. Useful for checking how Obsidian indexes a line without writing a note.
+- **The buffer is transferred**: the call posts it to the worker in the transfer list, so the caller's `ArrayBuffer` is detached afterwards (`byteLength` 0). Encode a fresh one per call.
+- **Queued behind indexing**: it shares the worker's sequential queue with vault indexing, so it waits behind any pending re-index. A worker error is logged, and the promise resolves `undefined`.
+
+```js
+const meta = await app.metadataCache.computeMetadataAsync(new TextEncoder().encode('a #tag').buffer);
+meta.tags; // [{ tag: '#tag', position: {…} }]
+```
+
+For which tags it indexes and which it skips, see `obsidian-api-quirks.md`.
+
+## MetadataTypeManager (`app.metadataTypeManager`)
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 — read from `app.js` and measured
+
+- **`setType(name, widget)` is the safe write**: it updates the in-memory property type map at once, saves `.obsidian/types.json`, then fires `changed` with the lowercased name. `unsetType(name)` removes an assignment the same way. Measured: `getAssignedWidget(name)` returned the new type before the save resolved, and `types.json` held it afterwards.
+- **Names are case-insensitive**: the map is keyed by the lowercased name and keeps the casing of the first assignment.
+- **Why not read-modify-write `types.json`**: Obsidian reloads the file only when a 50ms-debounced watcher sees an mtime newer than its own last save, so an outside write reaches the in-memory map late, and any `setType` in that window saves the in-memory map over it.
 
 ## Plugins (`app.plugins`)
 

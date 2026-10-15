@@ -1,8 +1,8 @@
 ---
 title: Android Chromium quirks
-description: Platform-specific quirks in Android Chromium WebView (Capacitor) affecting CSS environment variables, DOM timing, scroll behavior, and animation patterns.
+description: Platform-specific quirks in Android Chromium WebView (Capacitor) affecting CSS environment variables, DOM timing, file sharing and downloads, scroll behavior, and animation patterns.
 author: 🤖 Generated with Claude Code
-updated: 2026-04-09
+updated: 2026-10-15
 ---
 # Android Chromium quirks
 
@@ -23,6 +23,16 @@ Android's FUSE filesystem abstraction makes directory listing 25-50x slower than
 **Fix**: Lazy-init pattern — attempt in constructor, retry in first `onDataUpdated()` call.
 
 **Observed**: 2026-03-24, Obsidian 1.12.7, Pixel 8a (Android 16).
+
+For the case-insensitive shared storage behind a failing case-only rename, see `obsidian-api-quirks.md`.
+
+## No Web Share, and `blob:` downloads save nothing
+
+**Observed**: 2026-10-12 to 2026-10-13, Obsidian 1.14.4, Pixel 8a (GrapheneOS); desktop checked 2026-10-15, Electron 43.7.7
+
+- **No Web Share API**: `navigator.share` and `navigator.canShare` are `undefined` in Obsidian's Android WebView. Desktop Obsidian has neither, so a share-sheet export has no web path on either.
+- **A `blob:` download is dropped silently**: clicking an anchor whose `href` comes from `URL.createObjectURL()` and that carries `download` saves no file and shows no error.
+- **Write into the vault instead**: an export that works on mobile writes the file through the vault API — `vault.create()` at the vault root, for instance. Measured on the Pixel.
 
 ## Scrollbar always visible
 

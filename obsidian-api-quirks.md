@@ -1,10 +1,9 @@
 ---
 title: Obsidian API quirks
-description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, what a plugin reload leaves running, and workarounds.
+description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, what a plugin reload leaves running, rename ordering and case-only renames, which body tags the metadata cache indexes, tooltips and input suggest defaults, and workarounds.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-29
+updated: 2026-10-15
 ---
-
 # Obsidian API quirks
 
 ## Debounced disk writes (~2 seconds)
@@ -200,3 +199,63 @@ Measured, with the `changed` events of `app.plugins` (see `undocumented-obsidian
 
 - **Rebuild on the first `changed`, not in `onload`**: the first `changed` a freshly loaded module can hear is the enable's, and the stylesheet is back by then. A view rebuilt while it is missing lays out unstyled — measured: a view that sizes its first render from layout filled only one batch (20 items, content 2.1 panes tall) instead of 50, and stayed that way until scrolled.
 - **Scroll drifts while unstyled**: one open view's scroll went from 1400px to 3669px while the stylesheet was gone, and a rebuild that carried its position over landed at 1836px. Because the stylesheet goes first on unload, only a snapshot taken before the disable starts sees the styled layout.
+
+## Renaming a file
+
+### The vault `rename` event fires before `renameFile` resolves
+
+**Observed**: 2026-10-12 (Android) and 2026-10-15 (macOS desktop), Obsidian 1.14.4; the call order read from `app.js`
+
+`app.fileManager.renameFile(file, newPath)` runs the rename inside a queued link update, and the vault's `rename` event fires in the middle of it:
+
+1. **Collects links first**: it waits until the metadata cache is clean, then walks every reference in the vault, recording where each resolves, so the wait before the rename grows with the vault.
+2. **Renames**: the adapter moves the file and the vault fires `rename`, so every `rename` handler runs here.
+3. **Rewrites links, then resolves**: only after updating the collected links does the promise resolve.
+
+Measured: the event fired 53–73ms after the call on a Pixel 8a (GrapheneOS) and 111ms after it in a desktop vault; the promise resolved about 4–5ms after the event on both.
+
+- **A `rename` handler runs before the caller continues**: code that awaits `renameFile` and then records the new path, to tell its own renames from the user's, records it too late for its own `rename` handler. Set any such marker before the call.
+- **A rename started inside that window resolves before it happens**: while one rename's link update is running, another `renameFile` call joins its batch and resolves at once. Measured on desktop: a `renameFile` called from a `rename` handler resolved 2ms before its own `rename` event, with the file still at its old path.
+- **The link prompt holds the promise open**: with "Automatically update internal links" off and links to rewrite, Obsidian asks first, and `renameFile` resolves only after the user answers.
+
+### A case-only rename fails on Android shared storage
+
+**Observed**: 2026-10-11 to 2026-10-12, Obsidian 1.14.4, Pixel 8a (GrapheneOS); the adapter check read from `app.js`
+
+- **The filesystem folds case**: Android's shared storage resolves names case-insensitively — `test -e /storage/emulated/0/DOCUMENTS` succeeds with only `Documents` present.
+- **The mobile adapter assumes it does not**: before renaming, an adapter throws `Destination file already exists!` when the destination exists, unless the adapter is flagged case-insensitive and the two paths differ only in case. The desktop adapter sets that flag by probing its filesystem; the mobile adapter hard-codes it to `false`, and its probe does nothing.
+- **So `Note.md` → `note.md` throws**: the destination "exists" because it is the source itself. `vault.rename`, `fileManager.renameFile` and `adapter.rename` all end in that check.
+- **Two steps work**: rename to a temporary sibling name that exists in no case first, then to the target. Not measured on iOS.
+
+## Which body tags the metadata cache indexes
+
+**Observed**: 2026-10-13, Obsidian 1.14.4; re-run 2026-10-15 — each case parsed with `computeMetadataAsync` (see `undocumented-obsidian-apis.md`)
+
+| The tag sits | Indexed | Example → tags |
+|---|---|---|
+| On a line that opens an HTML block | No | `<div>#x</div>` → none |
+| In a fenced code block, a `cardlink` or `embed` card's `title:` included | No | `title: #x` in a `cardlink` block → none |
+| On the closing line of a multi-line HTML comment | No | `<!--`, `c`, `--> #x a` → none |
+| In any part of a `%%` comment: the opener's tail, an inner line, the closer's tail | Yes | `x %% #t %% y` → `#t` |
+| In a callout's title | Yes | `> [!note] #ct` → `#ct` |
+| In `<script>` content or a hidden element inside a paragraph | Yes | `a <script>#x</script>` → `#x` |
+
+- **The comment's closer line belongs to its `html` section**: the cache files a multi-line `<!-- … -->` as one `html` section, closer line included, so text after `-->` there is never tag-indexed — while Reading view shows it, as plain text.
+- **Indexing ignores visibility**: a tag inside `<span hidden>` or `<script>` in a paragraph is indexed although Reading view shows none of it. For which lines open an HTML block, see `reading-view-inline-html.md`.
+- **The cache trails typing**: Obsidian re-indexes a note when its file is modified, which for an open note happens only once the editor's debounced save lands. A tag being typed is absent from `getFileCache()` until then, so code reacting to it at once must read it from the text.
+
+## Tooltips have no public hide
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 (read from `app.js`)
+
+- **The API can only show one**: `displayTooltip()` and `setTooltip()` are public; the function that hides the tooltip on screen is module-private.
+- **Empty content is a no-op**: `displayTooltip(el, '')` returns at once, so it neither hides nor replaces the tooltip on screen.
+- **Obsidian hides its own through that private function**: the Add exclusion dialog behind the Excluded files setting shows its empty-filter error with `displayTooltip(input, message, { classes: ['mod-error'] })` and calls the private hide 2s later on the dialog window's timer. A plugin showing an error tooltip the same way has no call that takes it down.
+
+## `AbstractInputSuggest` defaults
+
+**Observed**: 2026-10-15, Obsidian 1.14.4 (read from `app.js`)
+
+- **`limit` cuts after `getSuggestions()`**: the returned array is sliced to `limit` (100 by default; 0 disables the cut) before rendering, so a row appended last — a "Create …" entry after the matches, say — is the first one cut.
+- **The default `selectSuggestion()` only calls back**: it runs the callback passed to `onSelect()` and nothing else. It neither writes the input nor closes the popover; the override or the callback has to call `setValue()` and `close()`.
+- **`setValue()` fires no `input` event**: it assigns the input's `value` (a contenteditable's `innerText`) directly, so nothing listening for `input` hears it — the suggester's own refresh included.
