@@ -2,9 +2,8 @@
 title: Electron popout window quirks
 description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows — observers, animation frames, hit-testing, element creation, image downloads and cleared image sources.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-29
+updated: 2026-10-15
 ---
-
 # Electron popout window quirks
 
 Obsidian's "Open in new window" creates an Electron `BrowserWindow` (popout) with its own document and its own `window` global — a separate JavaScript realm, with its own constructors — in the same renderer process and V8 isolate as the main window. Plugin JS runs in the main window's context but operates on DOM elements in the popout's document. This causes several non-obvious issues.

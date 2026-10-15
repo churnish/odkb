@@ -2,9 +2,8 @@
 title: iOS WebKit quirks
 description: Platform-specific bugs in iOS WebKit (WKWebView) affecting content-visibility, IntersectionObserver, CSS scroll-state(), compositor layer shifts, touch hit-testing, long-press image drag, and click synthesis — plus hover media queries on iPad and the native requestUrl transport.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-29
+updated: 2026-10-15
 ---
-
 # iOS WebKit quirks
 
 ## content-visibility: hidden + IntersectionObserver loop

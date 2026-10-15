@@ -1,6 +1,6 @@
 ---
 title: Declarative settings API quirks
-description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, the keys that match rows across renders, refresh semantics, the re-render skip that applies only to focused control rows, definitions that render nothing, row reuse, the row-batching rule that decides every box boundary, where a row's icon renders, search indexing, and a name collision that blanks the settings pane.
+description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, the keys that match rows across renders, refresh semantics, the re-render skip that applies only to focused control rows, which definitions without a control render, where `disabled` applies, row reuse, the row-batching rule that decides every box boundary, where a row's icon renders, search indexing, and a name collision that blanks the settings pane.
 author: 🤖 Generated with Claude Code
 updated: 2026-10-15
 ---
@@ -79,13 +79,16 @@ Reproduction: give a toggle a `desc` built from its own key's value, click it, a
 - **A sibling row's text is safe** — cascades that reword a *different* row do rebuild.
 - Nothing here affects `visible`/`disabled`; those re-apply on the focused row normally.
 
-## Definitions with no `control`, `render`, or `action` render nothing
+## A definition with no `control`, `render`, or `action` renders only with a `name`
 
-**Observed**: 2026-08-07, Obsidian 1.13.5 (installer 1.13.4)
+**Observed**: 2026-10-15, Obsidian 1.14.4
 
-The documentation lists "a setting with none of the above" as a valid shape, "useful for headings or static informational rows", and the typings declare a matching `SettingDefinitionEmpty`. In practice such a definition is **silently dropped** — the group renders with an empty `.setting-items` container and no error.
+The documentation lists "a setting with none of the above" as a valid shape, "useful for headings or static informational rows", and the typings declare a matching `SettingDefinitionEmpty`. Before rendering a group's or list's rows, the renderer keeps only definitions with a truthy `name`, `render`, `control`, or `action`, so such a definition shows or not by its `name` alone:
 
-An informational row (a call-to-action, a link to another plugin, an explanatory paragraph) therefore needs a `render` callback even when it mounts nothing but text:
+- **A named row renders as a static row**: `{ name, desc }` shows its name and description over an empty control area.
+- **A description-only row is silently dropped**: with `name: ''` and only a `desc`, the row is filtered out before rendering, and nothing is logged.
+
+An informational row with no visible name (a call-to-action, a link to another plugin, an explanatory paragraph) therefore needs a `render` callback even when it mounts nothing but text:
 
 ```ts
 {
@@ -121,13 +124,18 @@ async setControlValue(key: string, value: unknown): Promise<void> {
 
 Reaching for `render` instead — to get an `onChange` — is the wrong trade: it costs the automatic persistence and gains nothing that the `setControlValue` funnel doesn't already provide.
 
-## `render` rows: two hard constraints
+## `render` rows: `disabled` and row reuse
 
-### No `disabled` field
+### `disabled` works at runtime, but the typings reject it
 
-`SettingDefinitionRender` declares only `control?: never`, `action?: never`, `render`, plus the inherited `name` / `desc` / `aliases` / `searchable` / `visible`. **`disabled` exists only on `SettingControlBase` and `SettingDefinitionAction`.** Putting `disabled` on a render definition is a compile error.
+**Observed**: 2026-10-15, Obsidian 1.14.4
 
-Use `visible` instead, or call `setting.setDisabled()` inside the render body.
+The 1.13.6 changelog adds `SettingDefinitionBase#disabled`. The renderer reads `disabled` from any definition that has the key, falls back to `control.disabled` only when the key is absent, and passes the value, or the predicate's result, to `setting.setDisabled()` after every render and on every `refreshDomState()`.
+
+- **A `render` row disables like any other**: `disabled: true` adds `is-disabled` to the row and disables the buttons its callback added with `setting.addButton()`, and a predicate re-applies on `refreshDomState()`.
+- **The definition's `disabled` beats the control's**: a control row with `disabled: true` and `control.disabled: false` renders disabled.
+- **The 1.14.4 typings lag behind**: `SettingDefinitionBase` still declares no `disabled`, so a `render` definition carrying it fails to compile (`'disabled' does not exist in type 'SettingDefinitionRender'`) without a cast.
+- **`setting.setDisabled()` inside the render body avoids the cast** but re-applies only on `update()`, since `refreshDomState()` does not re-run `render`.
 
 ### The row element is reused across renders
 
