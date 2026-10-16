@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-15
+updated: 2026-10-16
 ---
 # Undocumented Obsidian APIs
 
@@ -217,11 +217,15 @@ app.metadataCache.iterateAllRefs((sourcePath, ref) => {
 
 ### `computeMetadataAsync(buffer)` parses any text
 
-**Observed**: 2026-10-13, Obsidian 1.14.4; re-run 2026-10-15
+**Observed**: 2026-10-13, Obsidian 1.14.4; re-run 2026-10-15 to 2026-10-16, desktop and Android (Pixel 8a)
 
-- **No note needed**: `app.metadataCache.computeMetadataAsync(arrayBuffer)` runs the metadata worker on UTF-8 bytes and resolves with a `CachedMetadata`-shaped object — `sections`, `tags`, `links`, `embeds`, `headings` and the rest, a key left out when the text holds none of it. Useful for checking how Obsidian indexes a line without writing a note.
+- **No note needed**: `app.metadataCache.computeMetadataAsync(arrayBuffer)` runs the metadata worker on UTF-8 bytes and resolves with a `CachedMetadata`-shaped object. Useful for checking how Obsidian indexes a line without writing a note, or for judging text the cache has not indexed yet — see "The metadata cache lags the write" in `obsidian-api-quirks.md`.
+- **The cache's shape**: the result holds `sections`, `headings`, `links`, `embeds` and `tags`, plus `frontmatter`, `frontmatterPosition` and `frontmatterLinks` for a properties block, a key left out when the text holds none of it. Empty text resolves `{}`.
+- **`tags` is body tags only**: a `#tag` inside a code fence or indented code is left out, as in the cache. Property tags stay in `frontmatter`.
+- **`frontmatter` is the plain property object**: it carries no `position` key; the block's position is `frontmatterPosition`.
 - **The buffer is transferred**: the call posts it to the worker in the transfer list, so the caller's `ArrayBuffer` is detached afterwards (`byteLength` 0). Encode a fresh one per call.
 - **Queued behind indexing**: it shares the worker's sequential queue with vault indexing, so it waits behind any pending re-index. A worker error is logged, and the promise resolves `undefined`.
+- **Fast enough to await inline**: desktop calls took 0.4–3.2 ms. On Android (Pixel 8a) a call resolved in about 13 ms, with the same result shape.
 
 ```js
 const meta = await app.metadataCache.computeMetadataAsync(new TextEncoder().encode('a #tag').buffer);

@@ -1,8 +1,8 @@
 ---
 title: Obsidian API quirks
-description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, Bases config quirks, what a plugin reload leaves running, rename ordering and case-only renames, which body tags the metadata cache indexes, tooltips and input suggest defaults, and workarounds.
+description: Undocumented Obsidian API behaviors. Covers file write timing, race conditions, how an open note's view reloads after a vault write, Reading view's stale hidden editor, background tabs and focus, Bases config quirks, what a plugin reload leaves running, rename ordering and case-only renames, which body tags the metadata cache indexes, tooltips and input suggest defaults, and workarounds.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-15
+updated: 2026-10-16
 ---
 # Obsidian API quirks
 
@@ -12,11 +12,67 @@ Obsidian debounces all file writes via `TextFileView.requestSave` with a **2-sec
 
 ### Implication for `vault.process()`
 
-`vault.process(file, fn)` reads the file **from disk**, not from Obsidian's in-memory state. If Obsidian has pending in-memory changes that haven't been flushed (within the ~2s debounce window), `vault.process()` reads stale content. Writing back the transformed result overwrites the file **without** the pending changes, causing data loss.
+`vault.process(file, fn)` reads the file **from disk**, not from Obsidian's in-memory state. If Obsidian has pending in-memory changes that haven't been flushed (within the ~2s debounce window), `vault.process()` reads stale content. Writing back the transformed result overwrites the file **without** the pending changes. What becomes of them depends on the view holding them:
+
+- **An open Markdown view merges them back**: a view that is still dirty, and was not empty when last saved, three-way merges its text with the new file text, shows a "modified externally" notice, and saves both changes — see "A vault write reloads the open view" below.
+- **An open `.base` file loses them**: its view loads the outside write as a new query object, replacing its own unflushed changes — see "How an open `.base` saves and reloads" below.
 
 ### Known race condition
 
-When a user creates a new Bases view and quickly switches its type (e.g., table → dynamic-views-grid), the new view exists in Obsidian's memory but not on disk. If `vault.process()` runs within the debounce window, it reads the file without the new view, rewrites it, and the view is lost. Obsidian then shows "View X not found."
+When a user creates a new Bases view and quickly switches its type (e.g., from table to a plugin-provided layout), the new view exists in Obsidian's memory but not on disk. If `vault.process()` runs within the debounce window, it reads the file without the new view, rewrites it, and the view is lost. Obsidian then shows "View X not found."
+
+## A vault write reloads the open view
+
+**Observed**: 2026-10-15 to 2026-10-16, Obsidian 1.14.4 (desktop); the dirty flag and the merge conditions read from `app.js`
+
+After `vault.process()` or `vault.modify()` writes a note that a view shows, Obsidian reloads the view from the file:
+
+- **The reload trails the event**: the view reads the file asynchronously, so `setViewData(fileText, false)` runs +1 to +55 ms after the vault `modify` event.
+- **It fires `editor-change`**: the workspace `editor-change` event fires for that view, with `info` the `MarkdownView` — so `info.file` is the note — and the editor already holding the reloaded text. In Reading view only the current mode reloads; see "Reading view's hidden editor goes stale" below.
+- **Hidden tabs reload too**: a tab that is not the selected one in its group reloads the same way.
+- **A clean view is overwritten**: a view that is not dirty takes the file's text as it stands. `requestSave()` marks a view dirty, and its save clears the flag as it starts.
+- **A dirty view is merged**: when a dirty view's text differs from both its last saved text and the new file text, Obsidian three-way merges the three and shows "“<name>” has been modified externally, merging changes automatically." Both changes are kept, and saved about 2s later.
+- **An empty last save skips the merge**: `TextFileView.loadFileInternal` merges only when the last saved or loaded text is non-empty, so the view of a note that was empty — a note just created — takes the file's text even while dirty. Measured: text written into a new note's editor before the reload was lost.
+- **No change, no reload**: a write that leaves the text unchanged fires no `modify` event and no reload. Two back-to-back writes each reload, in order, with the file text current at the time.
+
+### Waiting for the reload
+
+- **Check once after subscribing**: the reload's `editor-change` can fire before an awaited `vault.read()` of the same file resolves, so a wait that subscribes only after that read misses it. Check the view's state once right after subscribing.
+- **Compare with line breaks normalized**: a view reports a CRLF file's text with LF line breaks, through `getViewData()` and `editor.getValue()` alike, while `vault.read()` returns the text as stored.
+- **A note ending at its properties fence keeps its ending**: a reload of a note whose text ends at the closing `---` of its properties appends no line break. Live Preview appends one only on the view's initial load, which leaves the view dirty until Obsidian saves it about 2s later.
+
+### The metadata cache lags the write
+
+- **The cache indexes 4–7 ms after the write**: code running right after a write — another plugin's event fired right after its own write, say — still reads the old `getFileCache()` result.
+- **Parse the text instead of waiting**: run the written text through `computeMetadataAsync` (see `undocumented-obsidian-apis.md`) to judge its tags, headings or properties at once.
+
+## Reading view's hidden editor goes stale
+
+**Observed**: 2026-10-15 to 2026-10-16, Obsidian 1.14.4 (desktop) — measured, with the call sites read from `app.js`
+
+A Markdown view in Reading view keeps its editor rendered but hidden behind the preview, and Obsidian stops updating it:
+
+- **Only the current mode is updated**: in Reading view, `saveFrontmatter` and `onExternalDataChange` call `setViewData(text, false)`, which updates only the current mode. `view.editor.getValue()` can then hold text older than the file — a property added through the Properties panel stays out of it.
+- **The view's own text is current**: `view.getViewData()` (it returns `this.currentMode.get()`), `view.data` and the file all hold the new text.
+- **A write into the hidden editor is lost**: it fires `editor-change`, with `info` the view, but never reaches the file.
+- **Switching back discards it**: on a switch back to editing, `setMode` reloads the editor from `view.data`.
+- **How a note lands in Reading view**: Obsidian's own note creators open a new note with `state: { mode: 'source' }`, so it opens for editing in Source view or Live Preview. A plain `leaf.openFile(file)` follows "Default view for new tabs" instead.
+
+### Implication
+
+- **Read through `getViewData()`**: unless the code only runs in Source view or Live Preview, read a Markdown view's text through `getViewData()`, not `editor.getValue()`.
+- **Write through the editor only while editing**: when `view.getMode()` is not `'source'`, write the file instead.
+
+## Opening a note in a background tab
+
+**Observed**: 2026-10-15 to 2026-10-16, Obsidian 1.14.4 (desktop) — measured, with `openFile`'s activation and `createLeafInTabGroup` read from `app.js`
+
+- **`active: false` cannot keep a new tab in the background**: `leaf.openFile(file, { active: false })` still left the leaf active, with keyboard focus inside it. `WorkspaceLeaf.openFile` passes `active` on as `state.active ?? (this === workspace.activeLeaf)`, so `false` only skips activating the leaf again — and the leaf may already be active from its creation (next bullets).
+- **`createLeafInParent` activates the new leaf**: measured with "Always focus new tabs" off, `workspace.createLeafInParent(tabGroup, index)` made the new leaf the active one and selected its tab before any `openFile`.
+- **"Always focus new tabs" decides it for `getLeaf('tab')`**: `createLeafInTabGroup`, which `getLeaf('tab')` runs, activates the new leaf only when `focusNewTab` ("Always focus new tabs", on by default) is on. With it off, a Cmd+click on a link opens the note in a tab that never becomes active.
+- **Send focus back explicitly**: after the open, `workspace.setActiveLeaf(previousLeaf, { focus: true })` hands the active leaf and keyboard focus back.
+- **An unselected tab's editor takes a cursor, not focus**: `editor.focus()` there leaves focus where it was and does not select the tab, while `editor.setCursor()` there persists until the tab is shown.
+- **`editor.hasFocus()` reads the window too**: it reads `false` whenever the window itself lacks OS focus. Judge focus by `document.activeElement`.
 
 ## Notice container stale cache
 
@@ -242,7 +298,7 @@ Measured: the event fired 53–73ms after the call on a Pixel 8a (GrapheneOS) an
 
 - **The comment's closer line belongs to its `html` section**: the cache files a multi-line `<!-- … -->` as one `html` section, closer line included, so text after `-->` there is never tag-indexed — while Reading view shows it, as plain text.
 - **Indexing ignores visibility**: a tag inside `<span hidden>` or `<script>` in a paragraph is indexed although Reading view shows none of it. For which lines open an HTML block, see `reading-view-inline-html.md`.
-- **The cache trails typing**: Obsidian re-indexes a note when its file is modified, which for an open note happens only once the editor's debounced save lands. A tag being typed is absent from `getFileCache()` until then, so code reacting to it at once must read it from the text.
+- **The cache trails typing**: Obsidian re-indexes a note when its file is modified, which for an open note happens only once the editor's debounced save lands. A tag being typed is absent from `getFileCache()` until then, so code reacting to it at once must read it from the text. For the lag behind a vault write, see "The metadata cache lags the write" above.
 
 ## Tooltips have no public hide
 
