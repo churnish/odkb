@@ -2,7 +2,7 @@
 title: Obsidian review bot
 description: Obsidian review bot behaviors, workarounds, and common issue solutions.
 author: 🤖 Generated with Claude Code
-updated: 2026-08-07
+updated: 2026-10-17
 ---
 # Obsidian review bot
 
@@ -63,3 +63,14 @@ Scope every run: `npx eslint <explicit file paths> --fix --rule '{"obsidianmd/<r
 ### Unused eslint-disable directives
 
 The bot flags directives that suppress rules that aren't actually triggered. Remove them. Note: the bot's scanner may differ from local ESLint — a directive can be "unused" per the bot but needed locally (or vice versa). When this happens, keep the directive with a description (bot ignores it anyway) and ensure local ESLint passes.
+
+### CSS lint warnings (`!important`, `:has`)
+
+**Observed**: 2026-10-17, the plugin directory's CSS lint
+
+The CSS lint reports both as warnings, which are advisory, not approval-blocking.
+
+- **`!important`**: the lint flags every one. Keep it, with a comment naming the competing selector and its specificity, where Obsidian's rule is gated on state classes; see `obsidian-css-specificity.md`.
+- **`:has()`**: the lint flags every one, citing broad selector invalidation; Obsidian's own `app.css` uses 14 `:has()` selectors (1.14.4).
+  - **Keep** a `:has()` anchored to a plugin-owned class or attribute that tests only that element's children (`.plugin-box > .rows[data-note]:has(> .row)`): it matches nothing outside the plugin's elements, and replacing it from script means watching Obsidian's own DOM changes.
+  - **Rework** one anchored broadly (`body:has(…)`, a bare `:has()`) or nested inside another `:has()`, which Electron discards (see `electron-css-quirks.md`).
