@@ -2,7 +2,7 @@
 title: Obsidian review bot
 description: Obsidian review bot behaviors, workarounds, and common issue solutions.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-17
+updated: 2026-10-18
 ---
 # Obsidian review bot
 
@@ -70,7 +70,8 @@ The bot flags directives that suppress rules that aren't actually triggered. Rem
 
 The CSS lint reports both as warnings, which are advisory, not approval-blocking.
 
-- **`!important`**: the lint flags every one. Keep it, with a comment naming the competing selector and its specificity, where Obsidian's rule is gated on state classes; see `obsidian-css-specificity.md`.
-- **`:has()`**: the lint flags every one, citing broad selector invalidation; Obsidian's own `app.css` uses 14 `:has()` selectors (1.14.4).
-  - **Keep** a `:has()` anchored to a plugin-owned class or attribute that tests only that element's children (`.plugin-box > .rows[data-note]:has(> .row)`): it matches nothing outside the plugin's elements, and replacing it from script means watching Obsidian's own DOM changes.
-  - **Rework** one anchored broadly (`body:has(…)`, a bare `:has()`) or nested inside another `:has()`, which Electron discards (see `electron-css-quirks.md`).
+- **`!important`**: the lint flags every one. Prefer setting, on the element itself, a variable Obsidian's winning rule reads; keep `!important`, with a comment naming the competing selector and its specificity, only where that rule is gated on state classes and sets a literal value. See `obsidian-css-specificity.md`.
+- **`:has()`**: the lint flags every one, citing broad selector invalidation, however narrowly it is anchored; Obsidian's own `app.css` uses 14 `:has()` selectors (1.14.4). Replace one where something else can stand in:
+  - **A state the script already knows**: when the plugin's own code adds or removes what the `:has()` tests, set a class or attribute there instead — an attribute on a list's rows container kept only while the list has entry rows, for one.
+  - **`display: contents`**: when the `:has()` only draws a hidden element's text elsewhere, give the element `display: contents` instead. It has no box, so a check for shown elements skips it, while its children render in its place as real text; see `declarative-settings-api.md`.
+  - A `:has()` nested inside another `:has()` is discarded by Electron outright; see `electron-css-quirks.md`.

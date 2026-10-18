@@ -1,8 +1,8 @@
 ---
 title: Obsidian CSS specificity
-description: How Obsidian's app.css uses high-specificity stateful selectors that plugin overrides cannot beat, how to identify the winning rule at runtime, when !important is the correct answer, and generic class names that app.css already styles.
+description: How Obsidian's app.css uses high-specificity stateful selectors that plugin overrides cannot beat, how to identify the winning rule at runtime, overriding the variable a winning rule reads, when !important is still the answer, and generic class names that app.css already styles.
 author: 🤖 Generated with Claude Code
-updated: 2026-09-25
+updated: 2026-10-18
 ---
 # Obsidian CSS specificity
 
@@ -19,7 +19,7 @@ A plugin toggles its own class on an Obsidian-owned element and expects `display
 }
 ```
 
-**Observed**: 2026-08-06, Obsidian 1.13.5 (installer 1.13.4).
+**Observed**: 2026-10-18, Obsidian 1.14.4.
 
 `app.css` reveals the editor's property container with:
 
@@ -31,6 +31,8 @@ A plugin toggles its own class on an Obsidian-owned element and expects `display
 ```
 
 That is **(0,5,0)**: four classes plus `:not(.mod-error)`. Adding one ancestor class to the plugin rule gets to (0,3,0) and still loses. The element keeps rendering, and — because the plugin's own class *is* applied and `matches()` returns true — the failure looks like a JS bug rather than a cascade loss.
+
+The value that rule sets is a variable: `app.css` defines `--metadata-display-editing` and `--metadata-display-reading` on `body`, and Reading view's rule, `.markdown-preview-view.show-properties .metadata-container` (0,3,0), reads `--metadata-display-reading` the same way. That variable is the way in; see "Choosing the fix".
 
 ## Diagnose before guessing
 
@@ -86,23 +88,29 @@ Prefer, in order:
 
 1. **Qualify with the element's own class or tag.** `input.my-input` (0,1,1) beats `input[type='text']` (0,1,1) on source order; `.setting-item.my-row` (0,2,0) beats `.setting-item` (0,1,0) outright. This is the right fix for the majority of cases and costs nothing.
 2. **Scope to a stable structural ancestor** — a container class that is part of the DOM contract, not a state flag.
-3. **`!important`, documented** — when the competing selector is gated on state classes.
+3. **Override the variable the winning rule reads** — when its value is `var(--x)`, set `--x` on the element itself. A custom property declared on the element beats the one it would inherit, whatever the competing selector's specificity.
+4. **`!important`, documented** — when the competing selector is gated on state classes and sets a literal value, so there is no variable to override.
 
-Reach for (3) only when (1) and (2) genuinely cannot win. The signal is that matching the competitor requires naming Obsidian's *state* classes (`.is-live-preview`, `.show-properties`, `.is-collapsed`, `.is-active`). Such a selector is not merely verbose — it is **fragile in a silent direction**: if Obsidian renames one class, the override stops applying and the plugin's intent (usually hiding something) fails without any error.
+Reach for (3) or (4) only when (1) and (2) genuinely cannot win. The signal is that matching the competitor requires naming Obsidian's *state* classes (`.is-live-preview`, `.show-properties`, `.is-collapsed`, `.is-active`). Such a selector is not merely verbose — it is **fragile in a silent direction**: if Obsidian renames one class, the override stops applying and the plugin's intent (usually hiding something) fails without any error.
 
-```scss
-/* REQUIRES !important: Obsidian reveals this container via
-   `.markdown-source-view.is-live-preview.show-properties .metadata-container:not(.mod-error)`
-   at (0,5,0). Matching that means chaining Obsidian's state classes, so the
-   override would fail silently if any were renamed. */
+The properties container from "The trap" takes (3): every `app.css` rule that shows it reads one of the two variables, so the plugin rule overrides both on the element and keeps `display: none` beside them for a container no such rule reaches.
+
+```css
+/* Obsidian's rules that show the container read these variables, so the container's own value wins over the inherited one */
 .metadata-container.my-hidden {
-  display: none !important;
+  --metadata-display-editing: none;
+  --metadata-display-reading: none;
+  display: none;
 }
 ```
 
+**Verified**: 2026-10-18, Obsidian 1.14.4 — the container stays hidden in Live Preview and Reading view.
+
+**Limit**: a theme rule that sets the container's `display` directly, at higher specificity than the plugin rule, still shows it; only `!important` would beat that.
+
 ## Interaction with the review bot
 
-`eslint-plugin-obsidianmd`'s CSS lint flags every `!important` as a warning and suggests raising specificity instead. That advice is correct for most cases and wrong for this one. Warnings are advisory, not approval-blocking — keep the declaration with a comment naming the competing selector and its specificity. See `obsidian-review-bot.md`.
+`eslint-plugin-obsidianmd`'s CSS lint flags every `!important` as a warning and suggests raising specificity instead. Warnings are advisory, not approval-blocking. Before keeping one, check whether the competing rule reads a variable (fix 3 above); where none does, keep the declaration with a comment naming the competing selector and its specificity. See `obsidian-review-bot.md`.
 
 ## A generic class name can collide with `app.css`
 

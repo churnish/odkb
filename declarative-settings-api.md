@@ -1,8 +1,8 @@
 ---
 title: Declarative settings API quirks
-description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, the keys that match rows across renders, refresh semantics, the re-render skip that applies only to focused control rows, which definitions without a control render, where `disabled` applies, row reuse, the row-batching rule that decides every box boundary, where a row's icon renders, search indexing, which rows keyboard navigation stops at, and a name collision that blanks the settings pane.
+description: Runtime behavior of Obsidian 1.13's getSettingDefinitions() API that the official docs don't state. Covers definition caching, when render callbacks re-run, the keys that match rows across renders, refresh semantics, the re-render skip that applies only to focused control rows, which definitions without a control render, where `disabled` applies, row reuse, the row-batching rule that decides every box boundary, where a row's icon renders, search indexing, which rows keyboard navigation stops at and how a text-only row stays out of it, and a name collision that blanks the settings pane.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-16
+updated: 2026-10-18
 ---
 # Declarative settings API quirks
 
@@ -165,13 +165,16 @@ function mountHost(settingEl: HTMLElement): HTMLElement {
 
 ## Keyboard navigation stops only at shown rows
 
-**Observed**: 2026-10-15 to 2026-10-16, Obsidian 1.14.4 — measured, with the navigation read from `app.js`
+**Observed**: 2026-10-15 to 2026-10-18, Obsidian 1.14.4 — measured, with the navigation read from `app.js`
 
 - **What the arrow keys visit**: the settings keyboard navigation (`getNavigableSettingItems` and `getTabSequence`) visits every `.setting-item:not(.setting-item-heading)`, `.setting-group-search` and heading `.extra-setting-button` for which `isShown()` is true.
 - **A hidden row is skipped**: a row hidden with `display: none` — which Obsidian's own `visible` toggling writes inline — is not visited.
 - **An empty group hides whole**: a group with no visible rows is hidden along with its heading.
-- **Shown but not visited**: text meant to be read without being an arrow-key stop can sit in a hidden row and be shown another way, a pseudo-element on the group for one. The group must keep at least one visible row, or it hides with the text.
-- **Accessibility trade-off**: a screen reader reads such text only when it is real DOM text, so moving text out of a navigable row also decides whether assistive technology can reach it.
+- **Shown but not visited**: give a row of text meant to be read, not stepped to, `display: contents`. `isShown()` is `!!this.offsetParent`, which is false for an element without a box, so the arrow keys skip the row, while its children lay out in its place as block children of `.setting-items` and its text stays real DOM text.
+  - **`visible` still hides it**: the inline `display: none` that `visible` writes outranks the class.
+  - **Its empty parts take no space**: Obsidian hides the empty control, and the icon in a `mod-no-icon` group, and the empty name lays out 0 px tall; setting all three to `display: none` is a guard only.
+  - **Keep it first in its box**: the row's own divider `::before` is still generated, positioned against an outer box, and Obsidian suppresses it only on `:first-child`.
+- **Accessibility**: a screen reader reads such text only when it is real DOM text, which `display: contents` keeps and a pseudo-element drawing the text elsewhere gives up.
 
 ## `renderTab` is a reserved method name
 
