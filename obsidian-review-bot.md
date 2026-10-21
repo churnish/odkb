@@ -2,7 +2,7 @@
 title: Obsidian review bot
 description: Obsidian review bot behaviors, workarounds, and common issue solutions.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-18
+updated: 2026-10-21
 ---
 # Obsidian review bot
 
@@ -59,6 +59,38 @@ As of `eslint-plugin-obsidianmd` 0.4.1 the `prefer-active-doc` rule ships as `of
 - `no-global-this` autofixes are crude — it strips `as typeof globalThis` casts and rewrites `Window & typeof globalThis` to `Window & typeof window`, which compiles but reads badly.
 
 Scope every run: `npx eslint <explicit file paths> --fix --rule '{"obsidianmd/<rule>":"warn"}'`. Always re-run `tsc --noEmit` afterwards — `prefer-window-timers` changes the return type of every fixed call from `NodeJS.Timeout` to `number`.
+
+### Obsidian's `moment` export reads as unsafe-any
+
+**Observed**: 2026-10-21, `obsidian` typings 1.13.1, `eslint-plugin-obsidianmd` 0.4.2
+
+- **Symptom**: the bot reports `no-unsafe-call`, `no-unsafe-member-access`, `no-unsafe-assignment` and `no-unsafe-return` ("an `error` typed value") on every direct `moment(...)` call and every method called on its result.
+- **Cause**: `obsidian.d.ts` types its `moment` export as `typeof Moment` through `import * as Moment from 'moment'`. The bot's environment does not resolve the `moment` package, so the export becomes an error type. Obsidian's other exports stay typed.
+- **Local lint cannot show it**: locally `moment` resolves (it is a dependency of the `obsidian` package), and the type-aware `@typescript-eslint/no-unsafe-*` rules are not part of a typical local config.
+- **Fix**: narrow the export once to a local structural type and route every call through it. An `as unknown as` assertion is not flagged:
+
+  ```ts
+  import { moment } from 'obsidian';
+
+  interface MomentDate {
+    format(format: string): string;
+    isValid(): boolean;
+  }
+
+  const createMoment = moment as unknown as (
+    input?: string,
+    format?: string,
+    strict?: boolean
+  ) => MomentDate;
+  ```
+
+  Declare only the methods the plugin calls, so the type stays honest without the `moment` package's own types.
+
+- **Reproduce locally** (valid only for this unresolved-`moment` case):
+  1. Copy the plugin's sources, `eslint.config.js`, `package.json`, `manifest.json` and `tsconfig.json` into `<dir>/<plugin>/`.
+  2. Build `<dir>/node_modules/` as one symlink per entry of the real `node_modules/`, leaving out `moment`.
+  3. Set `"preserveSymlinks": true` in the copied `tsconfig.json`. Without it TypeScript follows the symlinks back to the real tree and finds `moment`. A `paths` mapping of `moment` to a missing file does NOT hide it.
+  4. Run ESLint with the five rules turned on: `--rule '{"@typescript-eslint/no-unsafe-assignment":"warn","@typescript-eslint/no-unsafe-call":"warn","@typescript-eslint/no-unsafe-member-access":"warn","@typescript-eslint/no-unsafe-return":"warn","@typescript-eslint/no-unsafe-argument":"warn"}'`.
 
 ### Unused eslint-disable directives
 
