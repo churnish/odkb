@@ -2,7 +2,7 @@
 title: Electron popout window quirks
 description: Platform-specific quirks when running plugin code in Electron popout (BrowserWindow) windows — observers, animation frames, hit-testing, element creation, image downloads and cleared image sources.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-15
+updated: 2026-11-23
 ---
 # Electron popout window quirks
 
@@ -236,3 +236,11 @@ All workspace events (`window-open`, `layout-change`) fire at ~300-380ms after p
 ## ResizeObserver doesn't fire for minimized windows
 
 Electron does not dispatch `ResizeObserver` callbacks for minimized `BrowserWindow` instances. The window must be restored/shown before testing RO-based behavior. This applies to both main and popout windows.
+
+## Popout documents are in quirks mode
+
+**Observed**: 2026-11-22, Electron 43.8.4
+
+- **No doctype**: a popout's document is `about:blank` with no doctype, so `document.compatMode` reads `BackCompat`. The main window reads `CSS1Compat`.
+- **Picture-only lines size differently**: quirks mode's line-height rules change the height of a line that holds only an inline image or inline-block box. With `vertical-align: baseline`, a line holding only a `height: 1lh` `img` measured exactly one text line in a popout, but 20.8px against a 16.9px text line in standards mode; an `inline-flex` icon box measured 18.8px.
+- **Consequence**: a line or row height measured on picture-only content in a popout does not transfer to the main window, or to mobile, which has no popouts. Measure in both, or give the picture `vertical-align: top`, which keeps the line exactly one line tall in both modes.
