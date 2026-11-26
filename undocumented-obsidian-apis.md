@@ -2,7 +2,7 @@
 title: Undocumented Obsidian APIs
 description: Useful undocumented properties and methods discovered through runtime inspection.
 author: 🤖 Generated with Claude Code
-updated: 2026-10-16
+updated: 2026-11-26
 ---
 # Undocumented Obsidian APIs
 
@@ -64,6 +64,17 @@ Measured on macOS desktop after a real plugin reload:
 - **The rebuilt view starts at the top**: two views scrolled to 1380px and 1400px both came back at 0.
 - **Ephemeral state carries the position**: bracketing the swap with `getEphemeralState()` before and `setEphemeralState(state)` after brought a popout scrolled to 1195px back with its anchor item at exactly its saved 28px offset. During an in-place reload, though, the old view's scroll drifts before the plugin's own code can snapshot it — see `obsidian-api-quirks.md`.
 - **A hidden view gets no data**: Bases feeds a view in the hidden editor behind Reading view no data at all. Rebuilt views there had `data` unset and rendered nothing; switching the note to Live Preview then rendered 20 and 2 items in the same views.
+
+### Formula definitions
+
+**Observed**: 2026-11-26, Obsidian 1.15.1 (installer 1.15.0)
+
+`controller.query.formulas` maps each formula's name to an object holding its source in `text` and its parsed form in `formula`, with `getValue(entry)`, `test(entry)` and `toString()` (which returns `text`).
+
+- **Shared by every view**: a view's `config.query` is identity-equal to `controller.query`, so `view.config.query.formulas` reaches the base's formulas from inside a plugin view.
+- **An edit replaces the object**: `query.setFormulas(formulas)` assigns the new object, then calls `query.save()`, which hands the query to the controller's save function. The view then gets `onDataUpdated()` with the new results in `entry.getValue('formula.<name>')`.
+- **No file changes**: a formula edit moves no note's `stat.mtime`. A view that detects changes by mtime alone keeps showing the old results until something else forces a render — compare `text` across updates to catch it.
+- **Building a formula**: the class is not exported, but `new (query.formulas.<name>.constructor)(text)` parses a new one, so a probe can replay an edit: `query.setFormulas({ ...query.formulas, x: new Ctor('"new"') })`.
 
 ## Bases view settings menu (`viewMenu`)
 
