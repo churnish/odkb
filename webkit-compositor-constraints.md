@@ -103,7 +103,7 @@ iOS does NOT fire `touchstart` on the touch that stops momentum scroll. The user
 
 On Chromium (Android), the same touch-to-stop-momentum gesture fires `touchstart` and `touchmove` normally, allowing immediate gesture evaluation.
 
-**Implication**: JS-based gesture recognizers (slideshow swipe, drag handlers) cannot detect gestures on the touch that stops momentum. `touch-action` and `capture: true` do not help — the event is never dispatched.
+**Implication**: JS-based gesture recognizers (multi-image swipe, drag handlers) cannot detect gestures on the touch that stops momentum. `touch-action` and `capture: true` do not help — the event is never dispatched.
 
 Apple's Safari Web Content Guide: "One-finger panning doesn't generate any events until the user stops panning."
 
@@ -115,7 +115,7 @@ On an element with `touch-action: pan-y`, Chromium evaluates the initial movemen
 
 **Root cause**: WebKit does not implement directional locking based on initial gesture direction for `touch-action: pan-x`/`pan-y`. Chromium's behavior (giving up scrolling when the disallowed axis has greater displacement) is not specified by the W3C Pointer Events spec — it's an implementation choice.
 
-**Impact**: Horizontal swipe gestures on `touch-action: pan-y` elements require a straighter finger path on iOS than on Android. In practice, this is tolerable for slideshow navigation but may cause false cancellations for less precise gestures.
+**Impact**: Horizontal swipe gestures on `touch-action: pan-y` elements require a straighter finger path on iOS than on Android. In practice, this is tolerable for multi-image navigation but may cause false cancellations for less precise gestures.
 
 **Workaround**: The `use-gesture` library's `preventScroll` option calls `preventDefault()` on early `touchmove` events to determine direction before letting the browser take over. Adds a small delay (~250ms) before the swipe begins.
 
